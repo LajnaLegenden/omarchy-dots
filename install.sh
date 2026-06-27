@@ -1,43 +1,32 @@
 #!/usr/bin/env bash
-# Post-stow setup for things symlinks can't do:
-#   1. TPM (tmux plugin manager) + the plugins declared in tmux.conf
-#   2. the go-folder-finder (sessionizer) binary, via `go install`
-# Idempotent — safe to re-run.
-set -euo pipefail
+# Runner: executes every hook in install.d/ in filename order.
+# Hooks are independent and idempotent, so this is safe to run on every
+# deploy AND every later `git pull` ("each time"). One failing hook doesn't
+# block the rest — failures are collected and summarized at the end.
+#
+# Add setup for a new tool by dropping an executable NN-name.sh into install.d/
+# (NN = two-digit order prefix). No edits to this runner needed.
+set -uo pipefail
 
-MOD="github.com/LajnaLegenden/go-folder-finder"   # private repo, default branch: master
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install.d"
+[ -d "$DIR" ] || { echo "no install.d/ directory next to install.sh"; exit 1; }
 
-# --- TPM (tmux plugin manager) ---------------------------------------------
-TPM_DIR="$HOME/.tmux/plugins/tpm"
-if [ ! -d "$TPM_DIR" ]; then
-  echo "==> Cloning TPM into $TPM_DIR"
-  git clone --depth 1 https://github.com/tmux-plugins/tpm "$TPM_DIR"
-else
-  echo "==> TPM already present, skipping clone"
-fi
-if [ -x "$TPM_DIR/bin/install_plugins" ]; then
-  echo "==> Installing tmux plugins"
-  "$TPM_DIR/bin/install_plugins" || echo "   (plugin install reported an issue — run prefix+I inside tmux)"
-fi
-
-# --- go-folder-finder (sessionizer) ----------------------------------------
-if command -v go >/dev/null 2>&1; then
-  echo "==> Installing $MOD into ~/.local/bin"
-  export GOPRIVATE="github.com/LajnaLegenden/*"   # private module: skip proxy + checksum db
-  # `go install` fetches over HTTPS. For this private repo, rewrite just the
-  # LajnaLegenden namespace to SSH (narrow blast radius). Idempotent.
-  if ! git config --global --get url."git@github.com:LajnaLegenden/".insteadOf >/dev/null 2>&1; then
-    echo "    enabling git https->ssh rewrite for github.com/LajnaLegenden/* (needed to fetch the private module)"
-    git config --global url."git@github.com:LajnaLegenden/".insteadOf "https://github.com/LajnaLegenden/"
+failed=()
+for hook in "$DIR"/*.sh; do
+  [ -e "$hook" ] || continue            # glob stayed literal => no hooks
+  name="$(basename "$hook")"
+  echo "==> $name"
+  if bash "$hook"; then
+    echo "    ok"
+  else
+    echo "    FAILED"
+    failed+=("$name")
   fi
-  # Repo is untagged, so @latest won't resolve — fall back to the master branch.
-  GOBIN="$HOME/.local/bin" go install "${MOD}@latest" \
-    || GOBIN="$HOME/.local/bin" go install "${MOD}@master"
-  echo "    installed: $(command -v go-folder-finder || echo '~/.local/bin/go-folder-finder')"
-else
-  echo "!! 'go' not found. Install it, then re-run:  sudo pacman -S go && ./install.sh"
-fi
+  echo
+done
 
-echo
-echo "==> Done. Open a new shell (or: source ~/.bashrc), then start tmux."
-echo "    Sessionizer: 'ts' from the shell, or prefix+f inside tmux. (needs fzf)"
+if [ ${#failed[@]} -gt 0 ]; then
+  echo "Done with errors in: ${failed[*]}"
+  exit 1
+fi
+echo "Done. Open a new shell (source ~/.bashrc) and start tmux."
