@@ -1,0 +1,26 @@
+{
+  "roots": [
+    { "path": "~/Work", "maxDepth": 4 },
+    { "path": "~/Personal", "maxDepth": 4 }
+  ],
+  "filters": {
+    "markers": [".git"],
+    "includeGlobs": [],
+    "excludeGlobs": ["*node_modules*", "*vendor*", "*.cache*"],
+    "ignoreHidden": true
+  },
+  "picker": {
+    "backend": "rofi",
+    "fzf": { "bin": "fzf", "args": ["--prompt", "project> "] },
+    "rofi": { "bin": "vicinae", "args": ["dmenu"] }
+  },
+  "launch": {
+    "command": ""
+  },
+  "tmux": {
+    "prefix": "",
+    "sessionNameTemplate": "{basename}",
+    "switchBehavior": "auto",
+    "deduplicateByPath": true
+  }
+}

@@ -1,0 +1,31 @@
+# ---- Secrets — never commit ----
+*.key
+*.pem
+*_rsa
+*_rsa.pub
+*_ed25519
+*_ed25519.pub
+id_*
+*.gpg
+*.kbx
+.netrc
+.env
+.env.*
+*.secret
+secret*
+credentials*
+*.token
+.ssh/
+.gnupg/
+
+# ---- Machine-specific local overrides (committed as *.example only) ----
+local.conf
+
+# ---- Backup dupes that exist on the source box ----
+*.backup
+*.bak
+*~
+
+# ---- Editor / OS noise ----
+*.swp
+.DS_Store
