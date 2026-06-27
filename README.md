@@ -47,7 +47,7 @@ symlinks `~/.config/nvim` at it (keeping its own history/upstream intact).
 ## Deploy on a fresh Omarchy machine
 
 ```bash
-git clone <remote-url> ~/dotfiles
+git clone git@github.com:LajnaLegenden/omarchy-dots.git ~/dotfiles
 cd ~/dotfiles
 
 # 1. symlink the config packages into $HOME
