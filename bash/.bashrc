@@ -14,3 +14,10 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$P
 
 # My shell overrides — aliases shared across bash/zsh/fish live in one file.
 [ -f ~/.config/shell/aliases.sh ] && source ~/.config/shell/aliases.sh
+
+# fnm
+FNM_PATH="/home/lajna/.local/share/fnm"
+if [ -d "$FNM_PATH" ]; then
+  export PATH="$FNM_PATH:$PATH"
+  eval "$(fnm env --shell bash)"
+fi
