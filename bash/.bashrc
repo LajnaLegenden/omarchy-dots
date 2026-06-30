@@ -12,6 +12,9 @@
 # Omarchy already does this; the guard keeps it correct on plain Arch too.
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
 
+# ~/.local/scripts — the `scripts` stow package (e.g. hypr-move-workspace).
+case ":$PATH:" in *":$HOME/.local/scripts:"*) ;; *) export PATH="$HOME/.local/scripts:$PATH" ;; esac
+
 # My shell overrides — aliases shared across bash/zsh/fish live in one file.
 [ -f ~/.config/shell/aliases.sh ] && source ~/.config/shell/aliases.sh
 

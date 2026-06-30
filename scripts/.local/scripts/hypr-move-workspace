@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Move a Hyprland workspace to a different monitor, via a GUI picker.
+#   1. pick the workspace   (shows: <id> → <current monitor> (<N> win))
+#   2. pick the target monitor (shows the monitor's human name, port in [..])
+# Uses hyprctl + jq. Selector auto-detected (walker first) or forced with -s/--selector.
+set -euo pipefail
+
+# dmenu-style selectors we know how to drive, in auto-detect preference order.
+# Each reads newline-delimited stdin and prints the chosen line to stdout.
+PREFERENCE=(walker rofi wofi fuzzel tofi bemenu dmenu)
+
+# Fill SEL_ARGV with the argv for $1=tool driven as a dmenu with prompt $2.
+selector_argv() {
+  case "$1" in
+    walker) SEL_ARGV=(walker --dmenu -p "$2") ;;
+    rofi)   SEL_ARGV=(rofi -dmenu -i -p "$2") ;;
+    wofi)   SEL_ARGV=(wofi --dmenu -p "$2") ;;
+    fuzzel) SEL_ARGV=(fuzzel --dmenu --prompt "$2") ;;
+    tofi)   SEL_ARGV=(tofi --prompt-text "$2") ;;
+    bemenu) SEL_ARGV=(bemenu -p "$2") ;;
+    dmenu)  SEL_ARGV=(dmenu -p "$2") ;;
+    *) echo "unknown selector: $1 (known: ${PREFERENCE[*]})" >&2; return 1 ;;
+  esac
+}
+
+usage() {
+  cat <<EOF
+Usage: ${0##*/} [-s|--selector NAME]
+Move a Hyprland workspace to another monitor through a GUI picker.
+  -s, --selector NAME   force a selector (${PREFERENCE[*]}); default: first installed
+  -h, --help            this help
+EOF
+}
+
+SELECTOR=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s|--selector) SELECTOR=${2:?--selector needs a value}; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ -n "$SELECTOR" ]; then
+  command -v "$SELECTOR" >/dev/null 2>&1 || { echo "selector not found on PATH: $SELECTOR" >&2; exit 1; }
+else
+  for t in "${PREFERENCE[@]}"; do
+    command -v "$t" >/dev/null 2>&1 && { SELECTOR=$t; break; }
+  done
+  [ -n "$SELECTOR" ] || { echo "no supported selector found (${PREFERENCE[*]})" >&2; exit 1; }
+fi
+
+# pick PROMPT < list-on-stdin -> chosen line on stdout
+pick() { selector_argv "$SELECTOR" "$1"; "${SEL_ARGV[@]}"; }
+
+# 1. workspace: "<id> → <monitor> (<N> win)"; id is the first whitespace token.
+ws_line=$(hyprctl workspaces -j \
+  | jq -r 'sort_by(.id)[] | "\(.id) → \(.monitor) (\(.windows) win)"' \
+  | pick "Move which workspace?") || true
+[ -n "$ws_line" ] || exit 0          # cancelled
+ws=${ws_line%% *}
+
+# 2. monitor: "<description> [<name>]"; name (port) is what we dispatch with.
+mon_line=$(hyprctl monitors -j \
+  | jq -r 'sort_by(.id)[] | "\(.description) [\(.name)]"' \
+  | pick "Send workspace $ws to which monitor?") || true
+[ -n "$mon_line" ] || exit 0         # cancelled
+mon=$(printf '%s' "$mon_line" | sed -n 's/.*\[\(.*\)\]$/\1/p')
+[ -n "$mon" ] || { echo "could not parse monitor from: $mon_line" >&2; exit 1; }
+
+hyprctl dispatch moveworkspacetomonitor "$ws" "$mon"
