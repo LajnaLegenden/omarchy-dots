@@ -18,6 +18,9 @@ case ":$PATH:" in *":$HOME/.local/scripts:"*) ;; *) export PATH="$HOME/.local/sc
 # My shell overrides — aliases shared across bash/zsh/fish live in one file.
 [ -f ~/.config/shell/aliases.sh ] && source ~/.config/shell/aliases.sh
 
+# My functions.
+[ -f ~/.config/shell/functions.sh ] && source ~/.config/shell/functions.sh
+
 # fnm
 FNM_PATH="/home/lajna/.local/share/fnm"
 if [ -d "$FNM_PATH" ]; then
