@@ -1,0 +1,86 @@
+# See https://git-scm.com/docs/git-config
+#
+# Adopted into the dotfiles repo (stow package `git`). Note that
+# install.d/20-go-folder-finder.sh runs `git config --global`, which writes
+# THROUGH the stow symlink into this file -- expect it to show up in `git status`
+# on this repo if that hook ever adds something new.
+
+[alias]
+	co = checkout
+	br = branch
+	ci = commit
+	st = status
+	sw = switch
+	last = log -1 HEAD --stat
+	unstage = restore --staged
+	undo = reset --soft HEAD~1
+	amend = commit --amend --no-edit
+	lg = log --graph --oneline --decorate --all
+	# Branches ordered by most recent commit, with upstream + subject.
+	recent = branch --sort=-committerdate --format='%(HEAD)%(color:yellow)%(refname:short)|%(color:reset)%(committerdate:relative)|%(contents:subject)'
+	# What's actually mine on this branch vs the default branch.
+	mine = !git log --oneline origin/HEAD..HEAD
+[init]
+	defaultBranch = master
+[pull]
+	rebase = true 			 # Rebase (instead of merge) on pull
+[push]
+	autoSetupRemote = true   # Automatically set upstream branch on push
+	followTags = true        # Push annotated tags along with commits
+[fetch]
+	prune = true             # Drop local refs for branches deleted on the remote
+	pruneTags = true         # ...and the same for tags
+	fsckobjects = true       # Verify objects received from the remote
+[diff]
+	algorithm = histogram    # Clearer diffs on moved/edited lines
+	colorMoved = zebra       # Distinguish moved blocks from added/removed ones
+	mnemonicPrefix = true    # More intuitive refs in diff output
+	renames = copies         # Detect copies as well as renames
+[merge]
+	conflictStyle = zdiff3   # Show the common ancestor in conflict markers
+[rebase]
+	autosquash = true        # Honour `fixup!`/`squash!` commits automatically
+	autostash = true         # Stash and restore a dirty tree around a rebase
+	updateRefs = true        # Keep stacked branches pointing at the right commits
+[commit]
+	verbose = true           # Include diff comment in commit message template
+[column]
+	ui = auto 			     # Output in columns when possible
+[branch]
+	sort = -committerdate    # Sort branches by most recent commit first
+[tag]
+	sort = -version:refname  # Sort version numbers as you would expect
+[rerere]
+	enabled = true           # Record and reuse conflict resolutions
+	autoupdate = true        # Apply stored conflict resolutions automatically
+[help]
+	autocorrect = prompt     # Offer the intended command instead of guessing
+[log]
+	date = iso               # Unambiguous, sortable timestamps
+[transfer]
+	fsckobjects = true       # Reject malformed objects rather than storing them
+[receive]
+	fsckObjects = true
+
+# delta (installed by install.d/40-cli-tools.sh) for syntax-highlighted diffs.
+# Both values are shell snippets, so they degrade gracefully to less/cat on a
+# machine where delta isn't present.
+[core]
+	pager = "if command -v delta >/dev/null 2>&1; then delta; else less; fi"
+[interactive]
+	diffFilter = "if command -v delta >/dev/null 2>&1; then delta --color-only; else cat; fi"
+[delta]
+	navigate = true          # n / N jump between files in the diff
+	line-numbers = true
+	hyperlinks = true
+[user]
+	name = Linus Jansson
+	email = 00jansson@gmail.com
+[url "git@github.com:LajnaLegenden/"]
+	insteadOf = https://github.com/LajnaLegenden/
+
+# Per-directory identity. Uncomment (and create ~/.config/git/config-work) to
+# have anything under ~/Work commit with the work address automatically. Left
+# off by default because it silently changes commit authorship.
+# [includeIf "gitdir:~/Work/"]
+# 	path = config-work
