@@ -21,11 +21,17 @@ case ":$PATH:" in *":$HOME/.local/scripts:"*) ;; *) export PATH="$HOME/.local/sc
 # Omarchy's stock bash config (no-op if not on an Omarchy machine)
 [ -r "$OMARCHY_PATH/default/bash/rc" ] && source "$OMARCHY_PATH/default/bash/rc"
 
-# My shell overrides — aliases shared across bash/zsh/fish live in one file.
+# My shell overrides, in dependency order. Everything here runs AFTER Omarchy's
+# `default/bash/rc` above, which is what makes the overrides stick:
+#   - history.sh's HISTSIZE beats default/bash/shell's
+#   - options.sh's `bind` calls land after default/bash/rc's final `bind -f`
+#   - completions.sh needs `alias g='git'` and fzf's completion.bash to exist
+[ -f ~/.config/shell/env.sh ] && source ~/.config/shell/env.sh
 [ -f ~/.config/shell/aliases.sh ] && source ~/.config/shell/aliases.sh
-
-# My functions.
 [ -f ~/.config/shell/functions.sh ] && source ~/.config/shell/functions.sh
+[ -f ~/.config/shell/history.sh ] && source ~/.config/shell/history.sh
+[ -f ~/.config/shell/options.sh ] && source ~/.config/shell/options.sh
+[ -f ~/.config/shell/completions.sh ] && source ~/.config/shell/completions.sh
 
 # fnm
 FNM_PATH="/home/lajna/.local/share/fnm"
