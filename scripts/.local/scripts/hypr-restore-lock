@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Restore a crashed hyprlock (Hyprland's "Oopsie daisy" / lockdead screen).
+# Run from another TTY (ctrl+alt+F3) or SSH.
+# `hyprctl eval`/`hl.clear_crashed_lockscreen()` only works with a lua config
+# (verified: this system's hyprland.conf is legacy hyprlang), so this uses the
+# legacy-compatible path instead: allow a new lock client to attach, then
+# relaunch hyprlock.
+set -euo pipefail
+
+pkill -9 -x hyprlock 2>/dev/null || true
+hyprctl -i 0 keyword misc:allow_session_lock_restore 1
+hyprctl -i 0 dispatch exec hyprlock
