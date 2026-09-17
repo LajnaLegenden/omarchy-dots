@@ -12,6 +12,10 @@ o.bind("SUPER + ALT + RETURN", "Tmux",
 o.bind("SUPER + M", "Move workspace to monitor",
   os.getenv("HOME") .. "/.local/scripts/hypr-move-workspace")
 
+-- Omarchy ships Grok at SUPER+SHIFT+ALT+A; I use Claude instead.
+hl.unbind("SUPER + SHIFT + ALT + A")
+o.bind("SUPER + SHIFT + ALT + A", "Claude", { webapp = "https://claude.ai" })
+
 -- Omarchy ships HEY for mail and calendar (SUPER+SHIFT+E / ALT+E / C).
 -- I'm on Google, so unbind those three defaults and point them at Gmail and
 -- Google Calendar. `focus = true` reuses an existing window instead of
