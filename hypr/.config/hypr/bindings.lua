@@ -11,3 +11,18 @@ o.bind("SUPER + ALT + RETURN", "Tmux",
 -- Move the current workspace to the next monitor (scripts stow package).
 o.bind("SUPER + M", "Move workspace to monitor",
   os.getenv("HOME") .. "/.local/scripts/hypr-move-workspace")
+
+-- Omarchy ships HEY for mail and calendar (SUPER+SHIFT+E / ALT+E / C).
+-- I'm on Google, so unbind those three defaults and point them at Gmail and
+-- Google Calendar. `focus = true` reuses an existing window instead of
+-- spawning a second one -- the same treatment Omarchy gives its other Google
+-- webapps. Compose stays window-only: it's a throwaway, not a place to return to.
+hl.unbind("SUPER + SHIFT + E")
+o.bind("SUPER + SHIFT + E", "Email", { webapp = "https://mail.google.com/", focus = true })
+
+hl.unbind("SUPER + SHIFT + ALT + E")
+o.bind("SUPER + SHIFT + ALT + E", "New email",
+  { webapp = "https://mail.google.com/mail/?view=cm&fs=1&tf=1" })
+
+hl.unbind("SUPER + SHIFT + C")
+o.bind("SUPER + SHIFT + C", "Calendar", { webapp = "https://calendar.google.com/", focus = true })
