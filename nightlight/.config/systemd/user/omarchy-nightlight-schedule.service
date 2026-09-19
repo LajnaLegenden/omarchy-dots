@@ -1,0 +1,9 @@
+[Unit]
+Description=Fade the Omarchy night light toward the scheduled temperature
+Documentation=file:///home/lajna/.config/omarchy/nightlight-schedule.toml
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/scripts/omarchy-nightlight-schedule tick

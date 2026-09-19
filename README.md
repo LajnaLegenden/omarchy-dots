@@ -9,8 +9,9 @@ Hyprland).
 `~/.local/share/omarchy/` and are owned by `omarchy update`. This repo never
 touches Omarchy internals — it only layers on top of them.
 
-This is **v1** — intentionally small: tmux, the sessionizer, shell aliases, and
-Neovim. Hyprland/waybar/walker/theming come in a later version.
+Beyond the v1 set (tmux, the sessionizer, shell aliases, Neovim) this now also
+carries Hyprland keybindings and the night light schedule. Waybar/walker/theming
+still come later.
 
 Two kinds of setup:
 - **Stow packages** — plain config files symlinked into `$HOME` by `stow`.
@@ -25,7 +26,9 @@ dotfiles/
 ├── install.d/              # one hook per tool — drop a new NN-name.sh here to extend
 │   ├── 10-tmux-tpm.sh      #   TPM + tmux plugins
 │   ├── 20-go-folder-finder.sh  #   `go install` the sessionizer binary -> ~/.local/bin
-│   └── 30-nvim.sh          #   clone the nvim repo -> ~/Personal/nvim, link ~/.config/nvim
+│   ├── 30-nvim.sh          #   clone the nvim repo -> ~/Personal/nvim, link ~/.config/nvim
+│   ├── 40-nightlight.sh    #   enable the night light fade user timer
+│   └── 50-idle-inhibit.sh  #   AUR audio idle-inhibitor, so video stops the lock
 ├── bash/
 │   └── .bashrc             # → ~/.bashrc — sources Omarchy defaults, then my aliases
 ├── shell/
@@ -34,9 +37,22 @@ dotfiles/
 ├── tmux/
 │   └── .config/tmux/
 │       └── tmux.conf       # → ~/.config/tmux/tmux.conf — TPM plugins, matugen colors deferred
-└── tmux-sessionizer/
-    └── .config/tmux-sessionizer/
-        └── config.json     # → ~/.config/tmux-sessionizer/config.json — go-folder-finder config
+├── tmux-sessionizer/
+│   └── .config/tmux-sessionizer/
+│       └── config.json     # → ~/.config/tmux-sessionizer/config.json — go-folder-finder config
+├── hypr/
+│   └── .config/hypr/
+│       ├── bindings.lua    # → ~/.config/hypr/bindings.lua — my keybindings
+│       ├── autostart.lua   # → ~/.config/hypr/autostart.lua — starts hyprsunset
+│       └── hyprsunset.conf # → ~/.config/hypr/hyprsunset.conf — night light baseline
+├── scripts/
+│   └── .local/scripts/     # → ~/.local/scripts (on PATH)
+│       ├── hypr-move-workspace
+│       └── omarchy-nightlight-schedule   # night light fade, run by the timer
+└── nightlight/
+    └── .config/
+        ├── omarchy/nightlight-schedule.toml   # location, temperatures, fade length
+        └── systemd/user/                      # the timer + oneshot service
 ```
 
 Each top-level config dir is one Stow *package* whose inner tree mirrors `$HOME`,
@@ -51,7 +67,8 @@ git clone git@github.com:LajnaLegenden/omarchy-dots.git ~/dotfiles
 cd ~/dotfiles
 
 # 1. symlink the config packages into $HOME
-stow bash shell tmux tmux-sessionizer        # or: stow */  (stows every package dir)
+mkdir -p ~/.config/systemd/user     # so stow links units into it, not over it
+stow bash shell tmux tmux-sessionizer hypr scripts nightlight   # or: stow */
 
 # 2. run the install hooks (TPM + sessionizer binary + nvim clone)
 ./install.sh                                  # needs git, go, and SSH access to GitHub
@@ -171,6 +188,27 @@ stow -D tmux        # -D = delete: removes the symlinks, leaves the repo untouch
   → falls back from `@latest` to `@master`). Needs `go` + GitHub SSH; the hook
   enables a narrow `https→ssh` git rewrite for `LajnaLegenden/*`. Binary lands in
   `~/.local/bin`. Needs `fzf` at runtime.
+- **night light** (`nightlight` package + `40-nightlight.sh`) fades the screen
+  temperature instead of Omarchy's instant on/off toggle. hyprsunset can only
+  switch profiles abruptly, so `omarchy-nightlight-schedule` walks the
+  temperature in one-minute steps over an hour and pushes each step through
+  `hyprctl hyprsunset temperature` — the same IPC the bar indicator and
+  `omarchy toggle nightlight` use, so both keep working. Sunrise/sunset are
+  computed locally from the lat/long in
+  `~/.config/omarchy/nightlight-schedule.toml` (no network, no geolocation),
+  then clamped so a 59°N winter doesn't turn the screen orange at 14:48.
+  Toggling by hand pauses the schedule until the current stretch ends.
+  Inspect with `omarchy-nightlight-schedule schedule` (upcoming boundaries),
+  `curve` (today's full ramp) or `status` (what it wants right now).
+- **idle inhibit** (`50-idle-inhibit.sh`) installs the AUR package
+  `wayland-pipewire-idle-inhibit` and enables its user service. Without it the
+  screen locks mid-video: Omarchy's idle service does respect Wayland idle
+  inhibitors, but nothing creates one — Firefox only knows how to ask the
+  `org.freedesktop.ScreenSaver` / `org.gnome.SessionManager` D-Bus services,
+  which don't exist under Hyprland. The daemon watches PipeWire instead and
+  holds an inhibitor whenever audio is playing, so it covers every app. Nothing
+  to stow — the unit ships with the package. Silent video still won't inhibit;
+  the bar's Stay Awake toggle is the manual override.
 - **nvim** is cloned by `30-nvim.sh` from private
   `github.com/LajnaLegenden/nvim.git` to `~/Personal/nvim`, with `~/.config/nvim`
   symlinked at it. On re-run the hook leaves an existing clone untouched (so
@@ -184,5 +222,10 @@ stow -D tmux        # -D = delete: removes the symlinks, leaves the repo untouch
 | `ts` / `prefix+f`: command not found | `~/.local/bin` not on PATH, or binary not built. Re-run `./install.sh`; `exec bash`. |
 | `go install` / nvim clone fails to fetch | Need SSH access to the private repos. Check `ssh -T git@github.com`; for `go install`, confirm the `url."git@github.com:LajnaLegenden/".insteadOf` rewrite is set (the hook sets it). |
 | tmux statusline has no colors | Expected in v1 (matugen deferred). Comes back with the theming version. |
+| Night light never changes | `systemctl --user status omarchy-nightlight-schedule.timer`; check `hyprctl hyprsunset temperature` answers (hyprsunset must be running — `autostart.lua` starts it). |
+| Night light stuck at one temperature | A manual toggle pauses the schedule until the current stretch ends. To resume now: `rm ~/.local/state/omarchy/nightlight-schedule.json`. |
+| Fades at the wrong time | Wrong lat/long in `~/.config/omarchy/nightlight-schedule.toml`. Check with `omarchy-nightlight-schedule schedule`. |
+| Screen still locks during video | `systemctl --user status wayland-pipewire-idle-inhibit`. Confirm audio is actually playing: `pw-dump \| grep -A2 'Stream/Output/Audio'`. Muted video won't inhibit — use the bar's Stay Awake toggle. |
+| Screen now *never* locks | The inhibitor may be stuck on. Check with `systemctl --user stop wayland-pipewire-idle-inhibit && wayland-pipewire-idle-inhibit -v INFO` and watch for `DISABLED` when audio stops. |
 | tmux plugins not loading (no cpu/ram %) | `prefix + I`, or re-run `./install.sh`. |
 | nvim opens with stock config / no plugins | `~/.config/nvim` not linked or repo not cloned — re-run `./install.sh`; first launch bootstraps plugins. |

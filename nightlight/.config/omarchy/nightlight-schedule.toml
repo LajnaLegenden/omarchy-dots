@@ -1,0 +1,27 @@
+# Night light fade schedule (omarchy-nightlight-schedule).
+# Applied by the omarchy-nightlight-schedule.timer user timer, once a minute.
+# Edit freely -- no restart needed, the next tick picks it up.
+
+# Where you are. Defaults to Stockholm; change if you're elsewhere.
+latitude  = 59.3293
+longitude = 18.0686
+
+# 6500K matches what `omarchy toggle nightlight` calls "off", and 4000K what it
+# calls "on", so the manual toggle and this schedule agree on day and night.
+day_temperature   = 6500
+night_temperature = 4000
+
+# How long a full day<->night fade takes.
+fade_minutes = 60
+
+# Guard rails on the solar times. At 59 degrees north raw sunset/sunrise swings
+# from 14:48 to 22:09, which would mean an orange screen from mid-afternoon in
+# December and a bright one at 02:30 in June.
+earliest_evening_start = "17:00"   # never start warming before this
+latest_evening_start   = "22:00"   # always be warming by this
+earliest_morning_end   = "06:00"   # never be fully bright before this
+latest_morning_end     = "08:00"   # always be fully bright by this
+
+# If you toggle the night light by hand, stop steering until the current
+# stretch of the schedule ends (the next fade takes over again).
+respect_manual_override = true

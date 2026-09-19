@@ -5,8 +5,8 @@
 # LAST so they win. Both lines are guarded, so this file is also harmless on a
 # plain Arch box where Omarchy isn't installed.
 
-# Omarchy defaults (no-op if not on an Omarchy machine)
-[ -f ~/.local/share/omarchy/default/bash/rc ] && source ~/.local/share/omarchy/default/bash/rc
+# Omarchy environment (sets OMARCHY_PATH + PATH); needed even for non-interactive shells
+[ -r /usr/share/omarchy/default/bash/env-bootstrap ] && source /usr/share/omarchy/default/bash/env-bootstrap
 
 # Make sure ~/.local/bin (where ./install.sh drops go-folder-finder) is on PATH.
 # Omarchy already does this; the guard keeps it correct on plain Arch too.
@@ -15,11 +15,24 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$P
 # ~/.local/scripts — the `scripts` stow package (e.g. hypr-move-workspace).
 case ":$PATH:" in *":$HOME/.local/scripts:"*) ;; *) export PATH="$HOME/.local/scripts:$PATH" ;; esac
 
+# If not running interactively, stop here (leave this above the rc source)
+[[ $- != *i* ]] && return
+
+# Omarchy's stock bash config (no-op if not on an Omarchy machine)
+[ -r "$OMARCHY_PATH/default/bash/rc" ] && source "$OMARCHY_PATH/default/bash/rc"
+
 # My shell overrides — aliases shared across bash/zsh/fish live in one file.
 [ -f ~/.config/shell/aliases.sh ] && source ~/.config/shell/aliases.sh
 
 # My functions.
 [ -f ~/.config/shell/functions.sh ] && source ~/.config/shell/functions.sh
+
+# fnm
+FNM_PATH="/home/lajna/.local/share/fnm"
+if [ -d "$FNM_PATH" ]; then
+  export PATH="$FNM_PATH:$PATH"
+  eval "$(fnm env --shell bash)"
+fi
 
 # fnm
 FNM_PATH="/home/lajna/.local/share/fnm"

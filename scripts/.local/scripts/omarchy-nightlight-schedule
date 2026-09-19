@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Fade the Omarchy night light across the day, f.lux style.
+
+hyprsunset only understands instant `profile` switches, so this walks the
+temperature in small steps over a ramp and pushes each step through the same
+`hyprctl hyprsunset temperature` IPC that `omarchy toggle nightlight` and the
+bar indicator use. Run it once a minute from a systemd user timer.
+
+Config: ~/.config/omarchy/nightlight-schedule.toml
+State:  ~/.local/state/omarchy/nightlight-schedule.json
+"""
+
+import argparse
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+import tomllib
+from datetime import datetime, timedelta, timezone
+
+HOME = os.path.expanduser("~")
+CONFIG_PATH = os.path.join(HOME, ".config/omarchy/nightlight-schedule.toml")
+STATE_PATH = os.path.join(HOME, ".local/state/omarchy/nightlight-schedule.json")
+
+# hyprctl echoes back exactly what we set, so anything beyond rounding noise
+# means something other than us moved the temperature.
+MATCH_TOLERANCE_K = 25
+
+DEFAULTS = {
+    "latitude": 59.3293,
+    "longitude": 18.0686,
+    "day_temperature": 6500,
+    "night_temperature": 4000,
+    "fade_minutes": 60,
+    "earliest_evening_start": "17:00",
+    "latest_evening_start": "22:00",
+    "earliest_morning_end": "06:00",
+    "latest_morning_end": "08:00",
+    "respect_manual_override": True,
+}
+
+
+# --- config -----------------------------------------------------------------
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    try:
+        with open(CONFIG_PATH, "rb") as fh:
+            cfg.update(tomllib.load(fh))
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+def parse_hhmm(value):
+    hours, minutes = str(value).split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def at_minutes(day, minutes):
+    """Local-time datetime for `day` at `minutes` past midnight."""
+    return datetime.combine(day, datetime.min.time()).astimezone() + timedelta(minutes=minutes)
+
+
+# --- solar ------------------------------------------------------------------
+
+def julian_day_number(day):
+    a = (14 - day.month) // 12
+    y = day.year + 4800 - a
+    m = day.month + 12 * a - 3
+    return (day.day + (153 * m + 2) // 5 + 365 * y
+            + y // 4 - y // 100 + y // 400 - 32045)
+
+
+def julian_to_utc(jd):
+    return datetime.fromtimestamp((jd - 2440587.5) * 86400.0, tz=timezone.utc)
+
+
+def sun_events(day, lat, lon):
+    """Sunrise/sunset as local datetimes, or (None, None) above the polar circles."""
+    n = julian_day_number(day) - 2451545 + 0.0008
+    j_star = n + (-lon) / 360.0
+
+    mean_anomaly = (357.5291 + 0.98560028 * j_star) % 360.0
+    m_rad = math.radians(mean_anomaly)
+    center = (1.9148 * math.sin(m_rad)
+              + 0.0200 * math.sin(2 * m_rad)
+              + 0.0003 * math.sin(3 * m_rad))
+    ecliptic_lon = (mean_anomaly + center + 180 + 102.9372) % 360.0
+    lam_rad = math.radians(ecliptic_lon)
+
+    transit = (2451545.0 + j_star
+               + 0.0053 * math.sin(m_rad)
+               - 0.0069 * math.sin(2 * lam_rad))
+
+    sin_decl = math.sin(lam_rad) * math.sin(math.radians(23.4397))
+    decl = math.asin(sin_decl)
+    phi = math.radians(lat)
+
+    denom = math.cos(phi) * math.cos(decl)
+    if abs(denom) < 1e-12:
+        return None, None
+    cos_hour = (math.sin(math.radians(-0.833)) - math.sin(phi) * sin_decl) / denom
+    if cos_hour > 1 or cos_hour < -1:
+        return None, None  # polar night or midnight sun
+
+    hour_angle = math.degrees(math.acos(cos_hour)) / 360.0
+    rise = julian_to_utc(transit - hour_angle).astimezone()
+    setting = julian_to_utc(transit + hour_angle).astimezone()
+    return rise, setting
+
+
+# --- schedule ---------------------------------------------------------------
+
+def ramp_windows(day, cfg):
+    """(morning_start, morning_end, evening_start, evening_end) for a local date."""
+    lat, lon = float(cfg["latitude"]), float(cfg["longitude"])
+    fade = timedelta(minutes=int(cfg["fade_minutes"]))
+    sunrise, sunset = sun_events(day, lat, lon)
+
+    earliest_evening = at_minutes(day, parse_hhmm(cfg["earliest_evening_start"]))
+    latest_evening = at_minutes(day, parse_hhmm(cfg["latest_evening_start"]))
+    earliest_morning = at_minutes(day, parse_hhmm(cfg["earliest_morning_end"]))
+    latest_morning = at_minutes(day, parse_hhmm(cfg["latest_morning_end"]))
+
+    # Above the polar circles there is no sunrise/sunset to anchor to, so the
+    # clamps become the schedule.
+    evening_start = min(max(sunset or earliest_evening, earliest_evening), latest_evening)
+    morning_end = min(max(sunrise or latest_morning, earliest_morning), latest_morning)
+
+    return morning_end - fade, morning_end, evening_start, evening_start + fade
+
+
+def mired_lerp(from_k, to_k, fraction):
+    """Interpolate in mireds -- an even ramp there looks even to the eye."""
+    from_m, to_m = 1e6 / from_k, 1e6 / to_k
+    return int(round(1e6 / (from_m + (to_m - from_m) * fraction)))
+
+
+def schedule_for(now, cfg):
+    """(temperature, segment_id, description) for a local datetime."""
+    day_k = int(cfg["day_temperature"])
+    night_k = int(cfg["night_temperature"])
+    today = now.date()
+
+    last_end, last_kind = None, None
+    for offset in (-1, 0, 1):
+        day = today + timedelta(days=offset)
+        m_start, m_end, e_start, e_end = ramp_windows(day, cfg)
+
+        if m_start <= now < m_end:
+            frac = (now - m_start) / (m_end - m_start)
+            return mired_lerp(night_k, day_k, frac), f"{day}:morning", "morning fade"
+        if e_start <= now < e_end:
+            frac = (now - e_start) / (e_end - e_start)
+            return mired_lerp(day_k, night_k, frac), f"{day}:evening", "evening fade"
+
+        for end, kind in ((m_end, "day"), (e_end, "night")):
+            if end <= now and (last_end is None or end > last_end):
+                last_end, last_kind = end, kind
+
+    if last_kind == "day":
+        anchor = (last_end.date())
+        return day_k, f"{anchor}:day", "daytime"
+    anchor = (last_end.date()) if last_end else today
+    return night_k, f"{anchor}:night", "nighttime"
+
+
+# --- hyprsunset -------------------------------------------------------------
+
+def read_temperature():
+    try:
+        out = subprocess.run(["hyprctl", "hyprsunset", "temperature"],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    digits = "".join(c for c in out.stdout if c.isdigit())
+    return int(digits) if digits else None
+
+
+def ensure_running():
+    if read_temperature() is not None:
+        return True
+    subprocess.run(["bash", "-lc", "setsid uwsm-app -- hyprsunset >/dev/null 2>&1 &"],
+                   check=False)
+    for _ in range(20):
+        time.sleep(0.25)
+        if read_temperature() is not None:
+            return True
+    return False
+
+
+def apply_temperature(kelvin):
+    """A freshly booted hyprsunset stomps on early writes, so resend until it sticks."""
+    for _ in range(10):
+        subprocess.run(["hyprctl", "hyprsunset", "temperature", str(kelvin)],
+                       capture_output=True, check=False)
+        time.sleep(0.2)
+        if read_temperature() == kelvin:
+            return True
+    return False
+
+
+def refresh_indicator():
+    subprocess.run(["omarchy-shell", "-q", "nightlight", "refresh"],
+                   capture_output=True, check=False)
+
+
+# --- state ------------------------------------------------------------------
+
+def load_state():
+    try:
+        with open(STATE_PATH) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    tmp = STATE_PATH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, STATE_PATH)
+
+
+# --- commands ---------------------------------------------------------------
+
+def cmd_tick(cfg, dry_run):
+    now = datetime.now().astimezone()
+    target, segment, label = schedule_for(now, cfg)
+    state = load_state()
+
+    if dry_run:
+        print(f"{now:%H:%M:%S}  {label}  target={target}K  segment={segment}")
+        return 0
+
+    if not ensure_running():
+        print("hyprsunset is not reachable; skipping", file=sys.stderr)
+        return 1
+
+    current = read_temperature()
+
+    if cfg.get("respect_manual_override", True):
+        override = state.get("override_segment")
+        if override == segment:
+            return 0  # still inside the stretch the user overrode
+        if override is not None:
+            # The schedule has moved on to a new stretch, so take the wheel
+            # back. Skip the mismatch check this once -- the temperature is
+            # of course still whatever the user left it at.
+            state.pop("override_segment", None)
+        else:
+            last = state.get("last_applied")
+            if (last is not None and current is not None
+                    and abs(current - last) > MATCH_TOLERANCE_K):
+                state["override_segment"] = segment
+                save_state(state)
+                print(f"manual override detected ({current}K, expected {last}K); "
+                      f"standing down until segment {segment} ends")
+                return 0
+
+    if current == target:
+        state["last_applied"] = target
+        state["last_segment"] = segment
+        save_state(state)
+        return 0
+
+    if not apply_temperature(target):
+        print(f"failed to set {target}K", file=sys.stderr)
+        return 1
+
+    state["last_applied"] = target
+    state["last_segment"] = segment
+    save_state(state)
+    refresh_indicator()
+    print(f"{label}: {current}K -> {target}K")
+    return 0
+
+
+def cmd_schedule(cfg, days):
+    now = datetime.now().astimezone()
+    print(f"location  {cfg['latitude']}, {cfg['longitude']}")
+    print(f"fade      {cfg['fade_minutes']} min   "
+          f"day {cfg['day_temperature']}K / night {cfg['night_temperature']}K")
+    print()
+    for offset in range(days):
+        day = (now + timedelta(days=offset)).date()
+        sunrise, sunset = sun_events(day, float(cfg["latitude"]), float(cfg["longitude"]))
+        m_start, m_end, e_start, e_end = ramp_windows(day, cfg)
+        sr = f"{sunrise:%H:%M}" if sunrise else "--:--"
+        ss = f"{sunset:%H:%M}" if sunset else "--:--"
+        print(f"{day}  sun {sr}-{ss}   "
+              f"warm->cool {m_start:%H:%M}-{m_end:%H:%M}   "
+              f"cool->warm {e_start:%H:%M}-{e_end:%H:%M}")
+    return 0
+
+
+def cmd_curve(cfg, step):
+    now = datetime.now().astimezone()
+    midnight = datetime.combine(now.date(), datetime.min.time()).astimezone()
+    for minute in range(0, 24 * 60, step):
+        moment = midnight + timedelta(minutes=minute)
+        temp, _, label = schedule_for(moment, cfg)
+        bar = "#" * max(1, round((temp - 3000) / 100))
+        print(f"{moment:%H:%M}  {temp:>5}K  {label:<13} {bar}")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("tick", help="apply the temperature for right now (default)")
+    sub.add_parser("status", help="show what the schedule wants, change nothing")
+    sched = sub.add_parser("schedule", help="print upcoming ramp boundaries")
+    sched.add_argument("-n", "--days", type=int, default=7)
+    curve = sub.add_parser("curve", help="print today's full temperature curve")
+    curve.add_argument("-s", "--step", type=int, default=30, help="minutes per row")
+    args = parser.parse_args()
+
+    cfg = load_config()
+    if args.command == "schedule":
+        return cmd_schedule(cfg, args.days)
+    if args.command == "curve":
+        return cmd_curve(cfg, args.step)
+    return cmd_tick(cfg, dry_run=(args.command == "status"))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
