@@ -7,6 +7,10 @@ o.launch_on_start("claude-desktop")
 -- the fading live in the omarchy-nightlight-schedule user timer.
 o.launch_on_start("hyprsunset")
 
+-- Mouse & keyboard sharing daemon (no systemd unit shipped by the package).
+-- Wrapped so a system without lan-mouse installed notifies instead of failing silently.
+o.launch_on_start("launch-or-notify lan-mouse daemon")
+
 -- Pin those autostarted single-instance Electron apps to fixed workspaces.
 -- Class-based because PID-based initial-workspace tracking does not stick to
 -- them. `silent` places the window without pulling focus, on every launch.

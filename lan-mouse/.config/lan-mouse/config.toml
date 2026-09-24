@@ -1,0 +1,7 @@
+[[clients]]
+hostname = "192.168.50.103"
+ips = []
+position = "top"
+activate_on_startup = true
+
+[authorized_fingerprints]
