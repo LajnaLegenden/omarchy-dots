@@ -9,7 +9,8 @@ o.launch_on_start("hyprsunset")
 
 -- Mouse & keyboard sharing daemon (no systemd unit shipped by the package).
 -- Wrapped so a system without lan-mouse installed notifies instead of failing silently.
-o.launch_on_start("launch-or-notify lan-mouse daemon")
+-- Disabled for now; uncomment to start it again at login.
+-- o.launch_on_start("launch-or-notify lan-mouse daemon")
 
 -- Steam, straight to the tray. Wrapped like lan-mouse so a system without Steam
 -- notifies instead of failing silently.
