@@ -30,3 +30,10 @@ o.bind("SUPER + SHIFT + ALT + E", "New email",
 
 hl.unbind("SUPER + SHIFT + C")
 o.bind("SUPER + SHIFT + C", "Calendar", { webapp = "https://calendar.google.com/", focus = true })
+
+-- Brightness for all monitors at once: DDC backlight where the monitor supports
+-- it, software gamma everywhere else. See ~/.local/scripts/monitors-brightness.
+o.bind("SUPER + CTRL + UP", "Monitors brightness up",
+  os.getenv("HOME") .. "/.local/scripts/monitors-brightness +10", { repeating = true })
+o.bind("SUPER + CTRL + DOWN", "Monitors brightness down",
+  os.getenv("HOME") .. "/.local/scripts/monitors-brightness -10", { repeating = true })

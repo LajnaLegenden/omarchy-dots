@@ -11,6 +11,9 @@ o.launch_on_start("hyprsunset")
 -- Wrapped so a system without lan-mouse installed notifies instead of failing silently.
 o.launch_on_start("launch-or-notify lan-mouse daemon")
 
+-- Re-apply the saved monitor brightness (software dimming resets each session).
+o.launch_on_start(os.getenv("HOME") .. "/.local/scripts/monitors-brightness restore")
+
 -- Pin those autostarted single-instance Electron apps to fixed workspaces.
 -- Class-based because PID-based initial-workspace tracking does not stick to
 -- them. `silent` places the window without pulling focus, on every launch.

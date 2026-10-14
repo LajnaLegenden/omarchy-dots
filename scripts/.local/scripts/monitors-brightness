@@ -1,0 +1,95 @@
+#!/bin/bash
+# Set one brightness level across every monitor.
+#
+# Monitors that answer DDC/CI get a real backlight change through ddcutil.
+# Everything else (TVs, monitors with DDC switched off, laptop panels) is dimmed
+# in software through wl-gammarelay-rs, which works per output -- hyprsunset can
+# only dim all of them at once, and Hyprland's own sdrbrightness only applies in
+# HDR mode.
+#
+# Which monitors speak DDC is worked out with `ddcutil detect` and cached; the
+# cache is rebuilt whenever the set of connected outputs changes or a DDC write
+# fails.
+#
+# Usage: monitors-brightness [+N | -N | N | restore]
+#   no argument prints the current level; restore re-applies the saved level
+#   (run at login, since software dimming resets when the session starts).
+
+MIN=5
+MAX=100
+
+state="${XDG_STATE_HOME:-$HOME/.local/state}/monitors-brightness"
+ddc_cache="${XDG_CACHE_HOME:-$HOME/.cache}/monitors-brightness-ddc"
+runtime="${XDG_RUNTIME_DIR:-/tmp}"
+
+level=$(cat "$state" 2>/dev/null)
+[[ $level =~ ^[0-9]+$ ]] || level=$MAX
+
+case "${1:-}" in
+"") echo "$level"; exit 0 ;;
+restore) target=$level ;;
++[0-9]* | -[0-9]*) target=$((level + $1)) ;;
+[0-9]*) target=$1 ;;
+*) echo "usage: monitors-brightness [+N | -N | N | restore]" >&2; exit 1 ;;
+esac
+
+((target < MIN)) && target=$MIN
+((target > MAX)) && target=$MAX
+mkdir -p "${state%/*}"
+echo "$target" >"$state"
+
+# Cache layout: first line is the connected outputs, then one "output bus" line
+# per monitor that answered DDC. Monitors ddcutil flags as "Invalid display"
+# (no DDC/CI) are left out, so they fall through to gamma.
+outputs=$(hyprctl monitors -j | jq -r '.[].name' | sort | xargs)
+if [[ $(head -n1 "$ddc_cache" 2>/dev/null) != "$outputs" ]]; then
+  mkdir -p "${ddc_cache%/*}"
+  {
+    echo "$outputs"
+    ddcutil detect --terse 2>/dev/null | awk '
+      /^Display [0-9]/ { ok = 1 }
+      /^Invalid display/ { ok = 0 }
+      /I2C bus:/ { bus = $NF; sub("/dev/i2c-", "", bus) }
+      /DRM[_ ]connector:/ && ok { conn = $NF; sub("^card[0-9]+-", "", conn); print conn, bus }
+    '
+  } >"$ddc_cache"
+fi
+
+ddc_bus() { awk -v o="$1" 'NR > 1 && $1 == o { print $2 }' "$ddc_cache"; }
+
+# Software dimming for the rest. Start the relay if it isn't running yet.
+if ! busctl --user status rs.wl-gammarelay &>/dev/null; then
+  setsid -f wl-gammarelay-rs run &>/dev/null
+  for _ in {1..20}; do
+    busctl --user status rs.wl-gammarelay &>/dev/null && break
+    sleep 0.1
+  done
+fi
+for output in $outputs; do
+  # DDC monitors stay at full gamma, in case they were dimmed in software before.
+  if [[ -n $(ddc_bus "$output") ]]; then gamma=1; else gamma=$(awk "BEGIN { print $target / 100 }"); fi
+  busctl --user set-property rs.wl-gammarelay "/outputs/${output//-/_}" \
+    rs.wl.gammarelay Brightness d "$gamma" 2>/dev/null
+done
+
+[[ $1 == restore ]] || omarchy-osd -i brightness -p "$target"
+
+# DDC writes take a fraction of a second each, so they run in the background.
+# Only one worker runs at a time; it keeps going until it has applied the latest
+# saved level, so held-down keys settle on the right value.
+(
+  flock -n 9 || exit 0
+  applied=""
+  while level=$(cat "$state") && [[ $level != "$applied" ]]; do
+    pids=()
+    for bus in $(awk 'NR > 1 { print $2 }' "$ddc_cache"); do
+      ddcutil --bus "$bus" --noverify --sleep-multiplier 0.5 setvcp 10 "$level" &>/dev/null &
+      pids+=($!)
+    done
+    for pid in "${pids[@]}"; do
+      wait "$pid" || rm -f "$ddc_cache" # a bus may have moved; re-detect next time
+    done
+    applied=$level
+  done
+) 9>"$runtime/monitors-brightness.lock" &>/dev/null &
+disown
