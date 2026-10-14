@@ -11,6 +11,10 @@ o.launch_on_start("hyprsunset")
 -- Wrapped so a system without lan-mouse installed notifies instead of failing silently.
 o.launch_on_start("launch-or-notify lan-mouse daemon")
 
+-- Steam, straight to the tray. Wrapped like lan-mouse so a system without Steam
+-- notifies instead of failing silently.
+o.launch_on_start("launch-or-notify steam -silent")
+
 -- Re-apply the saved monitor brightness (software dimming resets each session).
 o.launch_on_start(os.getenv("HOME") .. "/.local/scripts/monitors-brightness restore")
 
