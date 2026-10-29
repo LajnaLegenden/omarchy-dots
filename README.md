@@ -31,6 +31,7 @@ dotfiles/
 │   ├── 30-nvim.sh          #   clone the nvim repo -> ~/Personal/nvim, link ~/.config/nvim
 │   ├── 40-cli-tools.sh     #   pacman: git-delta (git pager) + git-town (stacked PRs)
 │   ├── 40-nightlight.sh    #   enable the night light fade user timer
+│   ├── 40-game-mode.sh     #   enable the game-mode-ai user service
 │   └── 50-idle-inhibit.sh  #   AUR audio idle-inhibitor, so video stops the lock
 ├── bash/
 │   └── .bashrc             # → ~/.bashrc — sources Omarchy defaults, then everything below
@@ -64,11 +65,14 @@ dotfiles/
 ├── scripts/
 │   └── .local/scripts/     # → ~/.local/scripts (on PATH)
 │       ├── hypr-move-workspace
-│       └── omarchy-nightlight-schedule   # night light fade, run by the timer
-└── nightlight/
-    └── .config/
-        ├── omarchy/nightlight-schedule.toml   # location, temperatures, fade length
-        └── systemd/user/                      # the timer + oneshot service
+│       ├── omarchy-nightlight-schedule   # night light fade, run by the timer
+│       └── game-mode-ai                  # stops local AI services while a Steam game runs
+├── nightlight/
+│   └── .config/
+│       ├── omarchy/nightlight-schedule.toml   # location, temperatures, fade length
+│       └── systemd/user/                      # the timer + oneshot service
+└── game-mode/
+    └── .config/systemd/user/game-mode-ai.service  # runs game-mode-ai for the session
 ```
 
 Each top-level config dir is one Stow *package* whose inner tree mirrors `$HOME`,
@@ -84,7 +88,7 @@ cd ~/dotfiles
 
 # 1. symlink the config packages into $HOME
 mkdir -p ~/.config/systemd/user     # so stow links units into it, not over it
-stow bash shell scripts hypr tmux tmux-sessionizer nightlight
+stow bash shell scripts hypr tmux tmux-sessionizer nightlight game-mode
 stow --no-folding git    # keeps ~/.config/git a real dir; see Notes
 #   NB: `alacritty` is intentionally left out — the repo copy is behind the live
 #   file (missing its CSI-u Shift+Return bindings), so stowing it would regress.

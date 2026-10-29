@@ -1,0 +1,46 @@
+#!/bin/bash
+# Free the GPU for games: stop the local AI services while a Steam game runs,
+# and start them again once it exits.
+#
+# llama-server and the voicemode services sit on ~3 GB of the RTX 2070's 8 GB
+# VRAM even when idle, which leaves games short and makes them stutter. Only
+# services that were running when the game started are brought back.
+#
+# Polls for Steam's game launcher (every game runs under "SteamLaunch AppId=").
+# Runs as the game-mode-ai user service.
+
+SERVICES=(cursortab-llama.service voicemode-whisper.service voicemode-kokoro.service)
+INTERVAL=5
+
+stopped=()
+
+game_running() {
+  pgrep -f 'SteamLaunch AppId=' >/dev/null
+}
+
+restore() {
+  if ((${#stopped[@]})); then
+    systemctl --user start "${stopped[@]}"
+    stopped=()
+  fi
+}
+trap 'restore; exit 0' TERM INT
+
+while true; do
+  if game_running; then
+    if ((${#stopped[@]} == 0)); then
+      for s in "${SERVICES[@]}"; do
+        systemctl --user is-active --quiet "$s" && stopped+=("$s")
+      done
+      if ((${#stopped[@]})); then
+        systemctl --user stop "${stopped[@]}"
+        notify-send -t 3000 "Game mode" "Stopped AI services to free VRAM"
+      fi
+    fi
+  elif ((${#stopped[@]})); then
+    restore
+    notify-send -t 3000 "Game mode" "AI services restarted"
+  fi
+  sleep "$INTERVAL" &
+  wait $!
+done
