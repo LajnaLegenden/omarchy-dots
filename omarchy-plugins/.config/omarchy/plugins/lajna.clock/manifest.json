@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "lajna.clock",
   "name": "My Clock",
-  "version": "1.0.0",
-  "author": "Omarchy",
-  "description": "Date/time label with a calendar popup",
+  "version": "1.1.0",
+  "author": "lajna (cloned from Omarchy)",
+  "description": "Date/time label with a calendar popup that shows events from ICS feeds",
   "kinds": [
     "bar-widget"
   ],
@@ -13,9 +13,27 @@
   },
   "barWidget": {
     "displayName": "My Clock",
-    "description": "Date/time label with a calendar popup",
+    "description": "Date/time label with a calendar popup that shows events from ICS feeds",
     "category": "Time",
-    "allowMultiple": false
+    "allowMultiple": false,
+    "defaults": {
+      "agendaDays": 2,
+      "refreshMinutes": 15
+    },
+    "schema": [
+      {
+        "key": "agendaDays",
+        "type": "integer",
+        "label": "Agenda days, counting today",
+        "defaultValue": 2
+      },
+      {
+        "key": "refreshMinutes",
+        "type": "integer",
+        "label": "Calendar refresh interval (minutes, 5 or more)",
+        "defaultValue": 15
+      }
+    ]
   },
   "omarchy": {
     "clonedFrom": "omarchy.clock"

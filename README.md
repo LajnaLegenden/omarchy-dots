@@ -32,6 +32,7 @@ dotfiles/
 │   ├── 40-cli-tools.sh     #   pacman: git-delta (git pager) + git-town (stacked PRs)
 │   ├── 40-nightlight.sh    #   enable the night light fade user timer
 │   ├── 40-game-mode.sh     #   enable the game-mode-ai user service
+│   ├── 70-clock-calendar.sh #  pacman: python-icalendar + python-recurring-ical-events (clock plugin)
 │   └── 50-idle-inhibit.sh  #   AUR audio idle-inhibitor, so video stops the lock
 ├── bash/
 │   └── .bashrc             # → ~/.bashrc — sources Omarchy defaults, then everything below
@@ -71,8 +72,11 @@ dotfiles/
 │   └── .config/
 │       ├── omarchy/nightlight-schedule.toml   # location, temperatures, fade length
 │       └── systemd/user/                      # the timer + oneshot service
-└── game-mode/
-    └── .config/systemd/user/game-mode-ai.service  # runs game-mode-ai for the session
+├── game-mode/
+│   └── .config/systemd/user/game-mode-ai.service  # runs game-mode-ai for the session
+└── omarchy-plugins/
+    └── .config/omarchy/plugins/
+        └── lajna.clock/    # clone of omarchy.clock + ICS calendar events in the popup
 ```
 
 Each top-level config dir is one Stow *package* whose inner tree mirrors `$HOME`,
@@ -88,7 +92,8 @@ cd ~/dotfiles
 
 # 1. symlink the config packages into $HOME
 mkdir -p ~/.config/systemd/user     # so stow links units into it, not over it
-stow bash shell scripts hypr tmux tmux-sessionizer nightlight game-mode
+mkdir -p ~/.config/omarchy/plugins  # so stow links each plugin, not the whole dir
+stow bash shell scripts hypr tmux tmux-sessionizer nightlight game-mode omarchy-plugins
 stow --no-folding git    # keeps ~/.config/git a real dir; see Notes
 #   NB: `alacritty` is intentionally left out — the repo copy is behind the live
 #   file (missing its CSI-u Shift+Return bindings), so stowing it would regress.
@@ -176,7 +181,7 @@ git add btop && git commit -m "Add btop config"
 ```bash
 cd ~/dotfiles
 git pull
-stow -R bash shell scripts hypr tmux tmux-sessionizer   # -R = restow (picks up new/renamed files)
+stow -R bash shell scripts hypr tmux tmux-sessionizer omarchy-plugins   # -R = restow (picks up new/renamed files)
 stow -R --no-folding git
 ./install.sh                                 # re-run hooks (idempotent) to pick up new tools
 ```
@@ -194,11 +199,21 @@ stow -D tmux        # -D = delete: removes the symlinks, leaves the repo untouch
   here contain no keys/tokens/passwords.
 - `.gitignore` blocks credential patterns (`*.key`, `id_*`, `.env`, `.netrc`,
   `.ssh/`, `.gnupg/`, etc.) as a safety net regardless.
+- **Never commit `~/.config/omarchy/shell.json`.** The clock plugin's
+  `calendars` entries hold secret ICS URLs (anyone with one can read that
+  calendar). `.gitignore` blocks `shell.json` for that reason.
 - Machine-specific values, if any get added later, go in a gitignored
   `local.conf` with a committed `local.conf.example` template. None needed yet.
 
 ## Notes / dependencies
 
+- **Clock calendar (`lajna.clock`).** A clone of Omarchy's `omarchy.clock`, so
+  it no longer picks up upstream clock fixes. Calendars go on the clock's entry
+  in `~/.config/omarchy/shell.json`:
+  `"calendars": [{ "name": "Work", "url": "https://…/basic.ics", "color": "#7aa2f7", "email": "me@work.com" }]`.
+  `url` takes https, webcal or file; `email` hides events you declined. The
+  shell's live reload does not follow the stow symlink, so after editing the
+  plugin run `omarchy restart shell`.
 - **Shell load order matters.** `bash/.bashrc` sources Omarchy's
   `$OMARCHY_PATH/default/bash/rc` *first*, then the `~/.config/shell/*.sh`
   files. That ordering is what makes the overrides stick, and two of them only

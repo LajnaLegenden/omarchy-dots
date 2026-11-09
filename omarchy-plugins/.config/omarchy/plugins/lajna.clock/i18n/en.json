@@ -1,0 +1,11 @@
+{
+  "agenda.today": "Today",
+  "agenda.tomorrow": "Tomorrow",
+  "agenda.allDay": "All day",
+  "agenda.noTitle": "(No title)",
+  "agenda.empty": "No upcoming events",
+  "agenda.calendarNumber": "Calendar %1",
+  "agenda.staleCalendar": "%1 couldn't refresh, showing saved events",
+  "agenda.failedCalendar": "%1 couldn't load",
+  "agenda.helperFailed": "Calendar events unavailable"
+}

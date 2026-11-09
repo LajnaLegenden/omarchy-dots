@@ -4,6 +4,7 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
+import "Agenda.js" as Agenda
 
 // The clock's calendar popup: a month grid with ISO week numbers, built to
 // sit beside the weather panel — same hero-over-detail composition, same
@@ -12,6 +13,11 @@ import "Model.js" as Model
 // The grid is a read-out rather than a picker: today is the only marked
 // day, and the only thing that moves is which month is on screen —
 // chevrons, the scroll wheel, and the arrow keys all step it.
+//
+// lajna.clock adds calendar events from ICS feeds: colored dots under the
+// days that have events, and an agenda for today and the next days under
+// the month stepper. Feeds are listed in the `calendars` array on this
+// widget's shell.json entry; with none, the popup is the stock clock.
 //
 // BarWidget.qml owns the bar label and hands this panel the button to
 // anchor against.
@@ -80,6 +86,84 @@ Panel {
   readonly property var weekdays: Model.weekdayOrder(weekStart)
   readonly property var weeks: Model.monthGrid(viewYear, viewMonth, weekStart, todayKey)
 
+  // ---- Calendar events. `calendars` entries are {name, url, color, email};
+  //      the helper hides events `email` declined. agendaDays counts today.
+  readonly property var calendars: Agenda.normalizeCalendars(setting("calendars", []))
+  readonly property bool hasCalendars: calendars.length > 0
+  readonly property var calendarColors: calendars.map(function(c) { return c.color })
+  readonly property int agendaDayCount: Agenda.clampInt(setting("agendaDays", 2), 1, 14, 2)
+  readonly property int refreshMinutes: Agenda.clampInt(setting("refreshMinutes", 15), 5, 1440, 15)
+  // Follows the bar label: an "HH" clock lists events on a 24-hour clock.
+  readonly property bool hour24: Agenda.uses24Hour(setting("format", "dddd HH:mm"), labelLocale.timeFormat(Locale.ShortFormat))
+  // Minute-accurate "now" for the ended/current styling, ticked by the wall clock.
+  property real nowMs: Date.now()
+  readonly property var dayDots: hasCalendars ? Agenda.dotsByDay(feed.events, calendarColors, "") : ({})
+  readonly property var agenda: hasCalendars ? Agenda.agendaGroups(feed.events, today, agendaDayCount) : []
+  readonly property var feedWarnings: {
+    var out = []
+    if (!hasCalendars) return out
+    if (feed.helperFailed) out.push(strings.t("agenda.helperFailed"))
+    for (var i = 0; i < feed.errors.length; i++) {
+      var error = feed.errors[i]
+      var calendar = calendars[error.cal]
+      if (!calendar) continue
+      var name = calendar.name !== "" ? calendar.name : strings.t("agenda.calendarNumber").arg(error.cal + 1)
+      out.push(strings.t(error.cached ? "agenda.staleCalendar" : "agenda.failedCalendar").arg(name))
+    }
+    return out
+  }
+
+  Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
+
+  CalendarFeed {
+    id: feed
+    calendars: root.calendars
+    refreshMinutes: root.refreshMinutes
+  }
+
+  TextMetrics {
+    id: timeMetrics
+    font.family: root.contentFontFamily
+    font.pixelSize: Style.font.bodySmall
+    text: root.hour24 ? "00:00–00:00" : "12:00 AM–12:00 AM"
+  }
+
+  TextMetrics {
+    id: allDayMetrics
+    font.family: root.contentFontFamily
+    font.pixelSize: Style.font.bodySmall
+    text: strings.t("agenda.allDay")
+  }
+
+  readonly property int timeColumnWidth: Math.ceil(Math.max(timeMetrics.advanceWidth, allDayMetrics.advanceWidth)) + Style.space(12)
+
+  function formatTime(ms) {
+    return new Date(ms).toLocaleTimeString(root.labelLocale, root.hour24 ? "HH:mm" : "h:mm AP")
+  }
+
+  function eventTimeLabel(event, dayKey) {
+    var span = Agenda.timeSpan(event, dayKey)
+    if (span === "allDay") return strings.t("agenda.allDay")
+    if (span === "from") return formatTime(event.start) + "–"
+    if (span === "until") return "–" + formatTime(event.end)
+    if (event.end <= event.start) return formatTime(event.start)
+    return formatTime(event.start) + "–" + formatTime(event.end)
+  }
+
+  function agendaDayLabel(group) {
+    if (group.offset === 0) return strings.t("agenda.today")
+    if (group.offset === 1) return strings.t("agenda.tomorrow")
+    return group.date.toLocaleDateString(root.labelLocale, "dddd d MMMM")
+  }
+
+  // The helper only passes links on the meeting-host allowlist; this is the
+  // last check before a URL from a feed reaches the browser.
+  function joinMeeting(url) {
+    if (!Agenda.isJoinUrl(url)) return
+    Quickshell.execDetached(["omarchy-launch-browser", url])
+    root.close()
+  }
+
 
   // Guarded so the widget renders before the bar is injected (the bar-widget
   // contract instantiates it bare).
@@ -94,6 +178,7 @@ Panel {
 
   function open() {
     refresh()
+    feed.refreshIfStale(5 * 60000)
     root.controller.show()
     // Set after showing, not before: showing hands the popout coordinator
     // over, which closes whichever panel was open, and that close clears the
@@ -243,6 +328,7 @@ Panel {
   WallClock {
     id: clock
     onDateChanged: {
+      root.nowMs = clock.date.getTime()
       if (Model.keyForDate(clock.date) === String(root.todayKey)) return
       var followToday = root.viewingCurrentMonth
       root.today = clock.date
@@ -704,6 +790,30 @@ Panel {
                         font.pixelSize: Style.font.body
                         font.bold: modelData.today
                       }
+
+                      // One dot per calendar with events that day, under
+                      // the number. Days outside the month fade with it.
+                      Row {
+                        readonly property var cellDots: root.dayDots[modelData.key] || []
+                        visible: cellDots.length > 0
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: Style.space(3)
+                        spacing: Style.space(3)
+                        opacity: modelData.inMonth ? 1 : 0.4
+
+                        Repeater {
+                          model: parent.cellDots
+
+                          Rectangle {
+                            required property var modelData
+                            width: Style.space(4)
+                            height: width
+                            radius: width / 2
+                            color: modelData !== "" ? modelData : Commons.Color.accent
+                          }
+                        }
+                      }
                     }
                   }
                 }
@@ -781,6 +891,167 @@ Panel {
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.moveMonth(1)
+              }
+            }
+          }
+
+          // ---- Agenda: today and the next days, under a hairline so it
+          //      reads as its own block. Ended events dim, the current one
+          //      takes the accent, and a row with a meeting link opens it.
+          Item {
+            visible: root.hasCalendars
+            width: parent.width
+            height: visible ? agendaColumn.y + agendaColumn.height + Style.space(4) : 0
+
+            Rectangle {
+              id: agendaRule
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: gridColumn.width
+              height: Style.spacing.hairline
+              color: root.contentForeground
+              opacity: 0.1
+            }
+
+            Column {
+              id: agendaColumn
+              y: agendaRule.height + Style.space(12)
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: gridColumn.width
+              spacing: Style.space(10)
+
+              Repeater {
+                model: root.feedWarnings
+
+                Text {
+                  required property var modelData
+                  width: agendaColumn.width
+                  textFormat: Text.PlainText
+                  elide: Text.ElideRight
+                  text: "󰀦  " + modelData
+                  color: Commons.Color.urgent
+                  font.family: root.contentFontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Text {
+                visible: root.agenda.length === 0
+                width: agendaColumn.width
+                textFormat: Text.PlainText
+                horizontalAlignment: Text.AlignHCenter
+                text: strings.t("agenda.empty")
+                color: Qt.darker(root.contentForeground, 1.5)
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Repeater {
+                model: root.agenda
+
+                Column {
+                  id: dayGroup
+                  required property var modelData
+                  width: agendaColumn.width
+                  spacing: Style.space(2)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    leftPadding: Style.space(6)
+                    text: root.agendaDayLabel(dayGroup.modelData).toUpperCase()
+                    color: Qt.darker(root.contentForeground, 1.5)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                    font.letterSpacing: 1
+                    font.bold: true
+                  }
+
+                  Repeater {
+                    model: dayGroup.modelData.events
+
+                    Rectangle {
+                      id: eventRow
+                      required property var modelData
+                      readonly property string phase: Agenda.eventState(modelData, root.nowMs)
+                      readonly property bool current: phase === "now"
+                      readonly property bool joinable: Agenda.isJoinUrl(modelData.url)
+                      readonly property color textColor: current
+                        ? Style.selectedStateColor(root.contentForeground, Commons.Color.accent)
+                        : root.contentForeground
+                      readonly property string calendarColor: root.calendarColors[modelData.cal] || ""
+
+                      width: dayGroup.width
+                      height: Style.space(26)
+                      radius: Style.cornerRadius
+                      color: rowMouse.containsMouse
+                        ? Style.hoverFillFor(root.contentForeground, Commons.Color.accent)
+                        : "transparent"
+                      opacity: phase === "ended" ? 0.45 : 1
+
+                      Rectangle {
+                        id: calendarDot
+                        x: Style.space(6)
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(7)
+                        height: width
+                        radius: width / 2
+                        color: eventRow.calendarColor !== "" ? eventRow.calendarColor : Commons.Color.accent
+                      }
+
+                      Text {
+                        id: eventTime
+                        anchors.left: calendarDot.right
+                        anchors.leftMargin: Style.space(10)
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: root.timeColumnWidth
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        text: root.eventTimeLabel(eventRow.modelData, dayGroup.modelData.key)
+                        color: eventRow.current ? eventRow.textColor : Qt.darker(root.contentForeground, 1.4)
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.features: { "tnum": 1 }
+                      }
+
+                      Text {
+                        anchors.left: eventTime.right
+                        anchors.right: joinIcon.visible ? joinIcon.left : parent.right
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        text: eventRow.modelData.title !== "" ? eventRow.modelData.title : strings.t("agenda.noTitle")
+                        color: eventRow.textColor
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: eventRow.current
+                      }
+
+                      Text {
+                        id: joinIcon
+                        visible: eventRow.joinable
+                        anchors.right: parent.right
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText
+                        text: "󰕧"
+                        color: rowMouse.containsMouse
+                          ? Style.hoverStateColor(root.contentForeground, Commons.Color.accent)
+                          : eventRow.textColor
+                        font.family: root.contentFontFamily
+                        font.pixelSize: Style.font.body
+                      }
+
+                      MouseArea {
+                        id: rowMouse
+                        anchors.fill: parent
+                        enabled: eventRow.joinable
+                        hoverEnabled: enabled
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.joinMeeting(eventRow.modelData.url)
+                      }
+                    }
+                  }
+                }
               }
             }
           }
