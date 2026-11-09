@@ -30,6 +30,10 @@ local.conf
 *.swp
 .DS_Store
 
-# ---- Python bytecode ----
+# ---- Omarchy shell config: holds secret calendar ICS URLs (lajna.clock) ----
+shell.json
+
+# ---- Python bytecode / test caches ----
 __pycache__/
 *.pyc
+.pytest_cache/
