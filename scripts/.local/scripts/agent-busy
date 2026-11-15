@@ -1,0 +1,35 @@
+#!/bin/bash
+# Exit 0 if a coding agent (Claude Code, Codex, OpenCode) in tmux is still working, 1 if all are idle.
+# Used by idle-suspend so the PC doesn't sleep under a running agent.
+#
+# Busy means either:
+#   - an agent's tmux pane changed during the sample window. Working agents show a
+#     ticking timer/spinner; an agent finished at its prompt leaves a static screen.
+#   - a codex-continue is pending (agent parked on a rate limit, resumes later).
+# CPU use is deliberately not a signal: agents leave long-lived helpers behind
+# (e.g. an Android emulator) that would keep the PC awake forever.
+#
+# Usage: agent-busy [-v] [window_seconds]
+
+verbose=0; [[ $1 == -v ]] && { verbose=1; shift; }
+window=${1:-20}
+say() { (( verbose )) && echo "$@" >&2; return 0; }
+
+if pgrep -f '/codex-continue( |$)' >/dev/null; then say "busy: codex-continue pending"; exit 0; fi
+
+panes=$(tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null \
+  | awk '$2 ~ /^(claude|codex|opencode|opencode\.exe)$/ {print $1}')
+[[ -z $panes ]] && { say "idle: no agent panes"; exit 1; }
+
+snap() { tmux capture-pane -p -t "$1" 2>/dev/null | md5sum; }
+declare -A before
+for p in $panes; do before[$p]=$(snap "$p"); done
+sleep "$window"
+for p in $panes; do
+  if [[ $(snap "$p") != "${before[$p]}" ]]; then
+    say "busy: pane $p ($(tmux display -p -t "$p" '#{session_name}:#{window_index}.#{pane_index}')) changed"
+    exit 0
+  fi
+done
+say "idle: $(wc -w <<<"$panes") agent pane(s) static"
+exit 1

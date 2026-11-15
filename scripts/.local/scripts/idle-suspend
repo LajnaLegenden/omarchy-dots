@@ -1,0 +1,34 @@
+#!/bin/bash
+# Suspend after a long idle; run by hypridle (see ~/.config/hypr/hypridle.conf).
+#
+# The Omarchy shell's idle service only knows screensaver and lock, so hypridle
+# adds this one sleep step. It honours the bar's Stay Awake toggle, which the
+# shell keeps as a state file, so "stay awake" also means "don't sleep".
+#
+# If a coding agent is still working (see agent-busy), wait until it finishes,
+# then suspend. Coming back to the PC cancels the wait (hypridle on-resume
+# runs `idle-suspend --cancel`).
+
+pidfile=${XDG_RUNTIME_DIR:-/tmp}/idle-suspend.pid
+
+if [[ $1 == --cancel ]]; then
+  [[ -f $pidfile ]] && kill "$(cat "$pidfile")" 2>/dev/null
+  rm -f "$pidfile"
+  exit 0
+fi
+
+stay_awake() { [[ -f $HOME/.local/state/omarchy/indicators/stay-awake ]]; }
+stay_awake && exit 0
+
+echo $$ > "$pidfile"
+trap 'rm -f "$pidfile"' EXIT
+
+while "$HOME/.local/scripts/agent-busy" 20; do
+  logger -t idle-suspend "agent still working, postponing suspend"
+  sleep 40
+  stay_awake && exit 0
+done
+
+logger -t idle-suspend "no agent working, suspending"
+rm -f "$pidfile"
+systemctl suspend
