@@ -49,3 +49,6 @@ esac
 # pnpm end
 
 . "$HOME/.local/share/../bin/env"
+
+# Claude Code voice "coworker" mode (VoiceMode MCP, config in ~/.claude-voice/)
+alias claude-voice='claude --mcp-config ~/.claude-voice/mcp.json --append-system-prompt "$(cat ~/.claude-voice/voice-prompt.md)"'
