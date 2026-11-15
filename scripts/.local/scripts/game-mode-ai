@@ -1,12 +1,14 @@
 #!/bin/bash
-# Free the GPU for games: stop the local AI services while a Steam game runs,
-# and start them again once it exits.
+# Free the GPU for games: stop the local AI services while a Steam game or
+# Minecraft (ATLauncher) runs, and start them again once it exits.
 #
 # llama-server and the voicemode services sit on ~3 GB of the RTX 2070's 8 GB
 # VRAM even when idle, which leaves games short and makes them stutter. Only
 # services that were running when the game started are brought back.
 #
-# Polls for Steam's game launcher (every game runs under "SteamLaunch AppId=").
+# Polls for Steam's game launcher (every game runs under "SteamLaunch AppId=")
+# and for a Minecraft client started by ATLauncher (the launcher window itself
+# doesn't count, only the game, which carries -Dminecraft.launcher.brand=ATLauncher).
 # Runs as the game-mode-ai user service.
 
 SERVICES=(cursortab-llama.service voicemode-whisper.service voicemode-kokoro.service)
@@ -15,7 +17,7 @@ INTERVAL=5
 stopped=()
 
 game_running() {
-  pgrep -f 'SteamLaunch AppId=' >/dev/null
+  pgrep -f 'SteamLaunch AppId=|-Dminecraft\.launcher\.brand=ATLauncher' >/dev/null
 }
 
 restore() {
