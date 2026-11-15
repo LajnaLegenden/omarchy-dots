@@ -1,0 +1,37 @@
+#!/bin/bash
+# Stop Omarchy's display blanking from sending the Samsung TV into an HDMI flap.
+#
+# When the lock blanks the displays (DPMS off), the TV loses its signal, reports
+# the HDMI link as unplugged, and Hyprland ends up cycling it on and off until
+# the NVIDIA driver wedges. So the TV must never just lose its signal:
+#
+#   - paired with the TV (samsung-tv pair saved a token): power it off over the
+#     network when the other monitors blank, and back on when they wake.
+#   - not paired: switch the TV's output straight back on, so it keeps showing
+#     the lock screen; turn it off with its own remote.
+#
+# Polls Hyprland because it emits no event for DPMS changes. Started from
+# autostart.lua; a lock keeps it to one instance per session.
+
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/tv-follow-dpms.lock"
+flock -n 9 || exit 0
+
+TV_OUTPUT="HDMI-A-1"
+tv="$HOME/.local/scripts/samsung-tv"
+token="$HOME/.local/state/samsung-tv/token"
+last=""
+
+while sleep 0.5; do
+  monitors=$(hyprctl monitors -j 2>/dev/null) || continue
+
+  if [[ -s $token ]]; then
+    # The TV itself drops out of the list once it is off, so watch the others.
+    awake=$(jq -r --arg tv "$TV_OUTPUT" '[.[] | select(.name != $tv) | .dpmsStatus] | any' <<<"$monitors")
+    if [[ -n $last && $awake != "$last" ]]; then
+      if [[ $awake == "true" ]]; then "$tv" on; else "$tv" off; fi
+    fi
+    last=$awake
+  elif [[ $(jq -r --arg tv "$TV_OUTPUT" '.[] | select(.name == $tv) | .dpmsStatus' <<<"$monitors") == "false" ]]; then
+    hyprctl dispatch "hl.dsp.dpms({ action = \"enable\", monitor = \"$TV_OUTPUT\" })" >/dev/null
+  fi
+done

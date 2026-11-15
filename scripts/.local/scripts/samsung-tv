@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Turn the Samsung TV on or off over the network.
+
+Talks to the TV's remote-control WebSocket API (wss://TV:8002), the same one the
+SmartThings app uses. The first connection pops an "Allow" prompt on the TV;
+the token it hands back is saved so later calls go straight through.
+
+Power on: KEY_POWER works while the TV is in network standby (its API still
+answers with PowerState "standby"). Once it has dropped off the network
+entirely, a Wake-on-LAN packet is sent first.
+
+Usage: samsung-tv [on | off | status | pair]
+"""
+
+import base64
+import json
+import os
+import socket
+import ssl
+import struct
+import sys
+import time
+import urllib.request
+
+TV_IP = "192.168.50.83"
+TV_MAC = "54:3a:d6:fa:73:80"
+APP_NAME = "Omarchy"
+TOKEN_FILE = os.path.expanduser("~/.local/state/samsung-tv/token")
+
+
+def power_state():
+    """'on', 'standby', or 'off' (API unreachable)."""
+    try:
+        with urllib.request.urlopen(f"http://{TV_IP}:8001/api/v2/", timeout=2) as r:
+            return json.load(r)["device"].get("PowerState", "on")
+    except Exception:
+        return "off"
+
+
+def read_token():
+    try:
+        with open(TOKEN_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def save_token(token):
+    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        f.write(token)
+
+
+def ws_send(sock, text):
+    payload = text.encode()
+    mask = os.urandom(4)
+    n = len(payload)
+    if n < 126:
+        header = struct.pack("!BB", 0x81, 0x80 | n)
+    else:
+        header = struct.pack("!BBH", 0x81, 0x80 | 126, n)
+    sock.sendall(header + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+
+def ws_recv(sock):
+    def exact(n):
+        buf = b""
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("TV closed the connection")
+            buf += chunk
+        return buf
+
+    _, b2 = exact(2)
+    n = b2 & 0x7F
+    if n == 126:
+        n = struct.unpack("!H", exact(2))[0]
+    elif n == 127:
+        n = struct.unpack("!Q", exact(8))[0]
+    return exact(n).decode(errors="replace")
+
+
+def connect(timeout):
+    """Open the remote-control channel; waits up to `timeout` for the Allow prompt."""
+    name = base64.b64encode(APP_NAME.encode()).decode()
+    path = f"/api/v2/channels/samsung.remote.control?name={name}"
+    token = read_token()
+    if token:
+        path += f"&token={token}"
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE  # the TV uses a self-signed certificate
+    sock = ctx.wrap_socket(socket.create_connection((TV_IP, 8002), timeout=5))
+    key = base64.b64encode(os.urandom(16)).decode()
+    sock.sendall((
+        f"GET {path} HTTP/1.1\r\nHost: {TV_IP}:8002\r\nUpgrade: websocket\r\n"
+        f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    ).encode())
+    response = b""
+    while b"\r\n\r\n" not in response:
+        chunk = sock.recv(1024)
+        if not chunk:
+            raise ConnectionError("no handshake response")
+        response += chunk
+    if b" 101 " not in response.split(b"\r\n", 1)[0]:
+        raise ConnectionError(response.split(b"\r\n", 1)[0].decode())
+
+    sock.settimeout(timeout)
+    msg = json.loads(ws_recv(sock))
+    if msg.get("event") != "ms.channel.connect":
+        raise PermissionError(f"TV refused the connection ({msg.get('event')})")
+    new_token = msg.get("data", {}).get("token")
+    if new_token and new_token != token:
+        save_token(new_token)
+    sock.settimeout(5)
+    return sock
+
+
+def send_key(key):
+    sock = connect(timeout=30)
+    try:
+        ws_send(sock, json.dumps({
+            "method": "ms.remote.control",
+            "params": {"Cmd": "Click", "DataOfCmd": key, "Option": "false",
+                       "TypeOfRemote": "SendRemoteKey"},
+        }))
+        time.sleep(0.5)
+    finally:
+        sock.close()
+
+
+def wake_on_lan():
+    mac = bytes.fromhex(TV_MAC.replace(":", ""))
+    packet = b"\xff" * 6 + mac * 16
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for _ in range(3):
+            s.sendto(packet, ("255.255.255.255", 9))
+            s.sendto(packet, (TV_IP, 9))
+            time.sleep(0.2)
+
+
+def wait_for(states, seconds):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        state = power_state()
+        if state in states:
+            return state
+        time.sleep(1)
+    return power_state()
+
+
+def turn_off():
+    if power_state() == "on":
+        send_key("KEY_POWER")
+
+
+def turn_on():
+    state = power_state()
+    if state == "off":
+        wake_on_lan()
+        state = wait_for(("on", "standby"), 20)
+    if state == "standby":
+        send_key("KEY_POWER")
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    try:
+        if cmd == "status":
+            print(power_state())
+        elif cmd == "off":
+            turn_off()
+        elif cmd == "on":
+            turn_on()
+        elif cmd == "pair":
+            connect(timeout=60).close()
+            print("paired, token saved to", TOKEN_FILE)
+        else:
+            print(__doc__.strip().splitlines()[-1], file=sys.stderr)
+            return 2
+    except Exception as e:
+        print(f"samsung-tv {cmd}: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
