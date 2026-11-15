@@ -1,0 +1,1836 @@
+#!/usr/bin/python3
+"""Colony Monitor: a read-only window onto a MineColonies colony.
+
+Reads the colony straight from the world save (refreshed whenever the game
+autosaves, every few minutes) and tails the game log for a live feed of colony
+chat. Never writes to the save.
+
+One window: a sidebar of sections, opening on a dashboard (headline numbers
+plus a preview of each section), then to do, open requests and builder work
+orders, citizens (happiness, sickness, job), complaints, visitors and the live feed.
+
+Usage: colony-monitor [path/to/instance]
+"""
+
+import gzip
+import io
+import json
+import math
+import os
+import re
+import struct
+import sys
+import time
+import zipfile
+import zlib
+from glob import glob
+
+import cairo
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
+
+INSTANCE = os.path.expanduser(
+    sys.argv[1] if len(sys.argv) > 1 else
+    "~/.local/share/atlauncher/instances/CREATEandCOLONYBetterfeatureswithCreateandMineColonies")
+POLL_SECONDS = 3
+FEED_LINES = 200
+# Written by kubejs/server_scripts/colony_export.js while the world is running.
+LIVE_EXPORT = os.path.join(INSTANCE, "kubejs", "exported", "colony.json")
+LIVE_MAX_AGE = 15
+
+# Request states, in the order of MineColonies' RequestState enum.
+STATES = ["Created", "Reported", "Assigning", "Assigned", "In progress", "Resolved",
+          "Follow-up", "Completed", "Failed", "Cancelled", "Received", "Overruled"]
+OPEN_STATES = {0, 1, 2, 3, 4, 5, 6}
+
+# Work order stages (BuildingStructureHandler.Stage).
+# Skill enum order (the save stores the index).
+SKILLS = ["Athletics", "Dexterity", "Strength", "Agility", "Stamina", "Mana",
+          "Adaptability", "Focus", "Creativity", "Knowledge", "Intelligence"]
+# Each job's primary and secondary skill (from MineColonies' BuildingModules).
+JOB_SKILLS = {
+    "Alchemist": ("Dexterity", "Mana"), "Archer": ("Agility", "Adaptability"),
+    "Baker": ("Knowledge", "Dexterity"), "Beekeeper": ("Dexterity", "Adaptability"),
+    "Blacksmith": ("Strength", "Focus"), "Builder": ("Adaptability", "Athletics"),
+    "Chef": ("Creativity", "Knowledge"), "Chicken Herder": ("Adaptability", "Agility"),
+    "Composter": ("Stamina", "Athletics"), "Concrete Mixer": ("Stamina", "Dexterity"),
+    "Cook": ("Adaptability", "Knowledge"), "Cowhand": ("Athletics", "Stamina"),
+    "Crusher": ("Stamina", "Strength"), "Courier": ("Agility", "Adaptability"),
+    "Dyer": ("Creativity", "Dexterity"), "Enchanter": ("Mana", "Knowledge"),
+    "Farmer": ("Stamina", "Athletics"), "Fisher": ("Focus", "Agility"),
+    "Fletcher": ("Dexterity", "Creativity"), "Florist": ("Dexterity", "Agility"),
+    "Glassblower": ("Creativity", "Focus"), "Healer": ("Mana", "Knowledge"),
+    "Knight": ("Adaptability", "Stamina"), "Forester": ("Strength", "Focus"),
+    "Mechanic": ("Knowledge", "Agility"), "Miner": ("Strength", "Stamina"),
+    "Nether Miner": ("Adaptability", "Strength"), "Planter": ("Agility", "Dexterity"),
+    "Quarrier": ("Strength", "Stamina"), "Rabbit Herder": ("Agility", "Athletics"),
+    "Researcher": ("Knowledge", "Mana"), "Sawmill": ("Knowledge", "Dexterity"),
+    "Shepherd": ("Focus", "Strength"), "Sifter": ("Focus", "Strength"),
+    "Smelter": ("Athletics", "Strength"), "Stablemaster": ("Athletics", "Dexterity"),
+    "Stonemason": ("Creativity", "Dexterity"), "Stone Smeltery": ("Athletics", "Dexterity"),
+    "Swine Herder": ("Strength", "Athletics"), "Teacher": ("Knowledge", "Mana"),
+    "Undertaker": ("Strength", "Mana"),
+}
+
+
+# Hut type -> the jobs it employs, for ranking against jobs the colony can offer.
+HUT_JOBS = {
+    "alchemist": ["Alchemist"], "baker": ["Baker"], "barracks": ["Knight", "Archer"],
+    "barrackstower": ["Knight", "Archer"], "beekeeper": ["Beekeeper"], "blacksmith": ["Blacksmith"],
+    "builder": ["Builder"], "chickenherder": ["Chicken Herder"], "composter": ["Composter"],
+    "concretemixer": ["Concrete Mixer"], "cook": ["Cook"], "cowboy": ["Cowhand"], "crusher": ["Crusher"],
+    "deliveryman": ["Courier"], "dyer": ["Dyer"], "enchanter": ["Enchanter"], "farmer": ["Farmer"],
+    "fisherman": ["Fisher"], "fletcher": ["Fletcher"], "florist": ["Florist"], "glassblower": ["Glassblower"],
+    "guardtower": ["Knight", "Archer"], "hospital": ["Healer"], "kitchen": ["Chef"], "lumberjack": ["Forester"],
+    "mechanic": ["Mechanic"], "miner": ["Miner"], "netherworker": ["Nether Miner"], "plantation": ["Planter"],
+    "quarrier": ["Quarrier"], "rabbithutch": ["Rabbit Herder"], "sawmill": ["Sawmill"], "school": ["Teacher"],
+    "shepherd": ["Shepherd"], "sifter": ["Sifter"], "smeltery": ["Smelter"], "stable": ["Stablemaster"],
+    "stonemason": ["Stonemason"], "stonesmeltery": ["Stone Smeltery"], "swineherder": ["Swine Herder"],
+    "university": ["Researcher"], "graveyard": ["Undertaker"],
+}
+
+
+def colony_jobs(buildings):
+    return {job for b in buildings.values() for job in HUT_JOBS.get(b["type"].split(":")[-1], [])}
+
+
+def best_jobs(skills, n=3, only=None):
+    """Jobs ranked by primary + secondary skill level."""
+    scores = {job: skills.get(a, 0) + skills.get(b, 0) for job, (a, b) in JOB_SKILLS.items()
+              if only is None or job in only}
+    return sorted(scores.items(), key=lambda kv: -kv[1])[:n]
+
+
+STAGES = ["Clearing", "Clearing", "Building solids", "Clearing water", "Building",
+          "Decorating", "Spawning", "Removing", "Complete"]
+
+
+# --- NBT ----------------------------------------------------------------------
+
+def load_nbt(path):
+    """Parse an NBT file (gzipped or not), or raw NBT bytes."""
+    raw = path if isinstance(path, bytes) else open(path, "rb").read()
+    try:
+        raw = gzip.decompress(raw)
+    except OSError:
+        pass
+    buf = io.BytesIO(raw)
+
+    def read(fmt):
+        return struct.unpack(">" + fmt, buf.read(struct.calcsize(fmt)))[0]
+
+    def string():
+        return buf.read(read("H")).decode("utf-8", "replace")
+
+    def payload(tag):
+        if tag == 1: return read("b")
+        if tag == 2: return read("h")
+        if tag == 3: return read("i")
+        if tag == 4: return read("q")
+        if tag == 5: return read("f")
+        if tag == 6: return read("d")
+        if tag == 7: buf.read(read("i")); return None
+        if tag == 8: return string()
+        if tag == 9:
+            inner, n = read("b"), read("i")
+            return [payload(inner) for _ in range(n)]
+        if tag == 10:
+            out = {}
+            while (inner := read("b")) != 0:
+                key = string()
+                out[key] = payload(inner)
+            return out
+        if tag == 11: return [read("i") for _ in range(read("i"))]
+        if tag == 12: return [read("q") for _ in range(read("i"))]
+        raise ValueError(f"unknown NBT tag {tag}")
+
+    tag = read("b")
+    string()
+    return payload(tag)
+
+
+def unpack_pos(value):
+    """BlockPos.asLong -> (x, y, z)."""
+    def signed(v, bits):
+        return v - (1 << bits) if v >= 1 << (bits - 1) else v
+    value &= (1 << 64) - 1
+    return (signed(value >> 38, 26), signed(value & 0xFFF, 12),
+            signed((value >> 12) & 0x3FFFFFF, 26))
+
+
+def pos_tuple(d):
+    return (d.get("x"), d.get("y"), d.get("z")) if isinstance(d, dict) else None
+
+
+def fmt_pos(p):
+    return " ".join(str(v) for v in p) if p else "?"
+
+
+# --- Text -----------------------------------------------------------------------
+
+def load_lang():
+    lang = {}
+    for jar in glob(os.path.join(INSTANCE, "mods", "minecolonies-*.jar")):
+        try:
+            with zipfile.ZipFile(jar) as z:
+                lang.update(json.loads(z.read("assets/minecolonies/lang/en_us.json")))
+        except (OSError, KeyError, ValueError):
+            pass
+    return lang
+
+
+LANG = load_lang()
+
+
+def item_name(item_id):
+    name = str(item_id).split(":", 1)[-1]
+    return name.replace("_", " ").title()
+
+
+def component_text(comp):
+    """Render a JSON text component (possibly a JSON string) to plain text."""
+    if isinstance(comp, str):
+        try:
+            comp = json.loads(comp)
+        except ValueError:
+            return comp
+    if isinstance(comp, str):
+        return comp
+    if isinstance(comp, list):
+        return "".join(component_text(c) for c in comp)
+    if not isinstance(comp, dict):
+        return str(comp)
+    if "translate" in comp:
+        key = comp["translate"]
+        if key not in LANG and re.match(r"^(block|item)\.[\w.]+$", key):
+            text = item_name(key.rsplit(".", 1)[-1])
+        else:
+            text = LANG.get(key, comp.get("fallback", key))
+        args = [component_text(a) for a in comp.get("with", [])]
+        try:
+            text = re.sub(r"%(\d+\$)?s", "%s", text) % tuple(args) if args else text
+        except TypeError:
+            pass
+    else:
+        text = comp.get("text", "")
+    return text + "".join(component_text(c) for c in comp.get("extra", []))
+
+
+def building_name(btype):
+    short = btype.split(":", 1)[-1]
+    return LANG.get(f"com.minecolonies.building.{short}", short.replace("_", " ").title())
+
+
+def job_name(jtype):
+    short = jtype.split(":", 1)[-1]
+    return LANG.get(f"com.minecolonies.job.{short}", short.replace("_", " ").title())
+
+
+# Domum Ornamentum blocks (Architect's Cutter) are one item id per shape; the
+# materials live in texture_data, keyed by the default texture they replace.
+DOMUM_SLOTS = {"minecraft:block/oak_planks": "frame", "minecraft:block/dark_oak_planks": "centre"}
+
+
+def domum_materials(stack):
+    data = stack.get("components", {}).get("domum_ornamentum:texture_data")
+    if not isinstance(data, dict):
+        return ""
+    if len(data) == 1:
+        return item_name(next(iter(data.values())))
+    return ", ".join(f"{DOMUM_SLOTS.get(slot, slot.rsplit('/', 1)[-1].replace('_', ' '))} {item_name(mat)}"
+                     for slot, mat in data.items())
+
+
+def describe_requested(req):
+    """Human description of a request's 'Requested' payload."""
+    if not isinstance(req, dict):
+        return str(req)
+    if "Type" in req and isinstance(req["Type"], str):      # tool request
+        levels = ["Wood/Gold", "Stone", "Iron", "Diamond", "Netherite"]
+        top = req.get("MaxLevel")
+        tier = f" (up to {levels[top - 1]})" if isinstance(top, int) and 0 < top <= len(levels) else ""
+        return f"{item_name(req['Type'])}{tier}"
+    if "id" in req:                                          # item stack
+        count = req.get("Count", req.get("count", 1))
+        mats = domum_materials(req)
+        return f"{count} × {item_name(req['id'])}" + (f" ({mats}; Architect's Cutter)" if mats else "")
+    for key in ("Stack", "stack"):
+        if isinstance(req.get(key), dict):
+            inner = dict(req[key])
+            inner["Count"] = req.get("Count", req.get("count", inner.get("count", 1)))
+            return describe_requested(inner)
+    for key in ("Stacks", "stacks", "List"):
+        if isinstance(req.get(key), list) and req[key]:
+            names = [describe_requested(s) for s in req[key][:3]]
+            more = f" (+{len(req[key]) - 3} more)" if len(req[key]) > 3 else ""
+            count = req.get("Count", req.get("count"))
+            return (f"{count} of: " if count else "One of: ") + ", ".join(names) + more
+    if "qty" in req:                                         # pickup: hut is full, courier collects
+        qty = req["qty"]
+        qty = qty.get("Data", {}).get("Value") if isinstance(qty, dict) else qty
+        return f"Pickup: {qty} items for the courier to collect"
+    if "Description" in req:
+        return component_text(req["Description"])
+    return ", ".join(f"{k}={v}" for k, v in req.items() if not isinstance(v, (dict, list)))[:80] or "?"
+
+
+# --- Colony model ---------------------------------------------------------------
+
+def find_save():
+    paths = glob(os.path.join(INSTANCE, "saves", "*", "data", "minecolonies_colony_manager.dat"))
+    return max(paths, key=os.path.getmtime) if paths else None
+
+
+# Time-based factors (CitizenHappinessHandler): a value below 1 is multiplied by
+# the last factor whose day threshold the modifier's day count has reached.
+TIME_FACTORS = {
+    "homelessness": [(7, 0.75), (14, 0.5)], "unemployment": [(7, 0.75), (14, 0.5)],
+    "health": [(7, 0.5), (14, 0.1)], "idleatjob": [(7, 0.5), (14, 0.1)],
+    # Days since last sleeping in a bed: 0.5 × 2 is neutral for the first two days.
+    "slepttonight": [(0, 2.0), (2, 1.6), (3, 1.0)],
+}
+
+
+def happiness_value(mod):
+    value = mod["supplier"].get("Value", 1)
+    if mod.get("modifier") == "minecolonies:time" and value < 1:
+        factor = value
+        for day, mult in TIME_FACTORS.get(mod["id"], []):
+            if mod.get("day", 0) >= day:
+                factor = value * mult
+        return factor
+    return value
+
+
+def happiness_active(mod):
+    """Expiration modifiers only count while 0 < days <= period (otherwise neutral)."""
+    if mod.get("modifier") != "minecolonies:expiration":
+        return True
+    return 0 < mod.get("day", 0) <= mod.get("period", 0)
+
+
+def read_colony(path):
+    root = load_nbt(path)["data"]["minecolonies"]["colonies"]
+    if not root:
+        raise ValueError("no colony in this world")
+    col = root[0]
+
+    buildings = {}
+    for b in col["buildingManager"]["buildings"]:
+        p = pos_tuple(b.get("location"))
+        buildings[p] = {"type": b["type"], "level": b.get("level", 0), "pos": p,
+                        "name": b.get("customName") or building_name(b["type"])}
+
+    citizens = []
+    for c in col["citizenManager"]["citizens"]:
+        job = c.get("job") if isinstance(c.get("job"), dict) else {}
+        mods = [m for m in c.get("newhappinesshandler", []) if happiness_active(m)]
+        # Like CitizenHappinessHandler: neutral factors (exactly 1.0) are left out of
+        # the average, so a few bad ones weigh heavily. Research bonuses aren't known here.
+        counted = [m for m in mods if happiness_value(m) != 1]
+        total_w = sum(m.get("weight", 0) for m in counted)
+        score = min(10.0, sum(m.get("weight", 0) * happiness_value(m) for m in counted)
+                    / total_w * 10) if total_w else 10.0
+        # (effective value, factor, raw value); the raw value carries e.g. the home level.
+        weak = sorted((happiness_value(m), m["id"], m["supplier"].get("Value", 1)) for m in mods
+                      if happiness_value(m) < 1)
+        disease = c.get("disease", {})
+        sick = disease.get("disease") or disease.get("Disease") or disease.get("id")
+        complaints = []
+        for opt in c.get("chatoptions", []):
+            o = opt.get("chatoption", {})
+            if o.get("inquiry"):
+                complaints.append({"text": component_text(o["inquiry"]), "priority": o.get("priority", 0)})
+        citizens.append({
+            "name": c["name"], "id": c.get("id"),
+            "job": job_name(job["type"]) if job.get("type") else "Unemployed",
+            "workpos": pos_tuple(job.get("workPos")),
+            "child": bool(c.get("child")),
+            "happiness": score, "weak": weak,
+            "sick": sick, "complaints": complaints,
+            "saturation": c.get("saturation", 0),
+        })
+
+    requests = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "Requested" in node and "State" in node:
+                requests.append(node)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(col["requestManager"])
+    open_requests = []
+    for r in requests:
+        if r.get("State") not in OPEN_STATES:
+            continue
+        loc = r.get("Requester", {}).get("Data", {}).get("Location", {}).get("Data", {}).get("Pos")
+        p = unpack_pos(loc) if isinstance(loc, int) else None
+        b = buildings.get(p)
+        open_requests.append({
+            "what": describe_requested(r["Requested"]),
+            "state": STATES[r["State"]] if r["State"] < len(STATES) else str(r["State"]),
+            "who": b["name"] if b else fmt_pos(p),
+            "worker": next((c["name"] for c in citizens if c["workpos"] == p), None),
+        })
+
+    orders = []
+    for w in col.get("work", {}).get("workOrders", []):
+        builder = pos_tuple(w.get("claimedByBuilding"))
+        orders.append({
+            "what": component_text({"translate": w.get("translationKey", "")}) or w.get("structurePath", "?"),
+            "level": f"{w.get('currentLevel', 0)} → {w.get('targetLevel', 1)}",
+            "stage": STAGES[w["stage"]] if isinstance(w.get("stage"), int) and w["stage"] < len(STAGES) else "",
+            "builder": next((c["name"] for c in citizens if builder and c["workpos"] == builder), "Unclaimed"),
+            "pos": fmt_pos(pos_tuple(w.get("location"))),
+            "resources": w.get("amountOfResources"),
+        })
+
+    visitors = []
+    for v in col.get("visitManager", {}).get("visitors", []):
+        levels = v.get("newSkills", {}).get("levelMap", [])
+        skills = {SKILLS[s["skill"]]: s.get("level", 0) for s in levels if s.get("skill", 99) < len(SKILLS)}
+        cost = v.get("rcost", {})
+        visitors.append({
+            "name": v["name"],
+            "cost": f"{v.get('rcostqty', cost.get('count', 1))} × {item_name(cost['id'])}" if cost.get("id") else "?",
+            "skills": skills,
+        })
+
+    research = {}
+    for r in col.get("research", {}).get("researchTree", []):
+        d = r.get("Data", r)
+        if d.get("id"):
+            research[d["id"]] = {"state": d.get("state", 0), "progress": d.get("progress", 0)}
+
+    return {"name": col.get("name", "Colony"), "day": col.get("colonyday"),
+            "citizens": citizens, "requests": open_requests, "orders": orders,
+            "visitors": visitors, "buildings": buildings, "research": research}
+
+
+def read_live(path):
+    """The in-game KubeJS export, if the game wrote it recently; else None."""
+    try:
+        with open(path) as f:
+            live = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if time.time() - live.get("exportedAt", 0) / 1000 > LIVE_MAX_AGE or not live.get("colonies"):
+        return None
+    return live
+
+
+def apply_live(col, live):
+    """Overlay the live export on the save model. Complaints and happiness
+    factors only exist in the save, so those are kept from it."""
+    lc = live["colonies"][0]
+    col["name"], col["day"] = lc.get("name", col["name"]), lc.get("day") or col["day"]
+    col["live"] = True
+    col["errors"] = live.get("errors", {})
+
+    saved = {c["name"]: c for c in col["citizens"]}
+    by_pos = {}
+    citizens = []
+    for lcit in lc.get("citizens", []):
+        c = dict(saved.get(lcit["name"], {"weak": [], "complaints": []}))
+        job = lcit.get("job")
+        c.update({
+            "name": lcit["name"], "child": lcit.get("child", False),
+            "job": job_name(job) if job else "Unemployed",
+            "workpos": tuple(lcit["work"]) if lcit.get("work") else None,
+            "sick": lcit["sick"]["name"] if lcit.get("sick") else None,
+            "cure": lcit["sick"]["cure"] if lcit.get("sick") else None,
+            "health": lcit.get("health"), "max_health": lcit.get("maxHealth"),
+            "saturation": lcit.get("saturation", c.get("saturation", 0)),
+            "status": component_text({"translate": lcit["status"]}) if lcit.get("status") else None,
+            "asleep": lcit.get("asleep"),
+        })
+        if lcit.get("happiness") is not None:
+            c["happiness"] = lcit["happiness"]
+        citizens.append(c)
+        if c["workpos"]:
+            by_pos[c["workpos"]] = c["name"]
+    col["citizens"] = citizens
+
+    requests = []
+    for b in lc.get("buildings", []):
+        for r in b.get("requests", []):
+            items = r.get("items") or []
+            pickup = r.get("type") == "Pickup"
+            if pickup and b.get("contents"):
+                top = sorted(b["contents"].items(), key=lambda kv: -kv[1])
+                items = [f"{n} × {name}" for name, n in top[:8]]
+            requests.append({
+                "what": r.get("what") or r.get("detail") or r.get("type"),
+                "state": r.get("state", "").replace("_", " ").capitalize(),
+                "who": LANG.get(b["name"], b["name"]), "worker": by_pos.get(tuple(b["pos"])),
+                "items": items, "pickup": pickup,
+                "resolver": r.get("resolver"),
+                "waiting": [f"{c['what']} ({c['resolver'] or '?'})" for c in r.get("children") or []],
+            })
+    col["requests"] = requests
+
+    orders = []
+    for o in lc.get("orders", []):
+        builder = tuple(o["builder"]) if o.get("builder") else None
+        orders.append({
+            "what": o["what"], "level": f"{o['level'][0]} → {o['level'][1]}",
+            "stage": (o.get("stage") or "").replace("_", " ").capitalize(),
+            "builder": by_pos.get(builder, "Unclaimed"),
+            "pos": fmt_pos(o.get("pos")), "resources": None,
+        })
+    col["orders"] = orders
+
+    col["todo"] = [{
+        "what": t.get("what") or t.get("detail"),
+        "who": t.get("requester") or fmt_pos(t.get("pos")),
+        "worker": by_pos.get(tuple(t["pos"])) if t.get("pos") else None,
+        "items": t.get("items") or [],
+        "retrying": t.get("handler") == "retrying",
+    } for t in lc.get("todo", [])]
+    col["housing"] = lc.get("housing")
+    col["warehouse"] = {}
+    for b in lc.get("buildings", []):
+        if b.get("type") == "minecolonies:warehouse":
+            for name, n in (b.get("contents") or {}).items():
+                col["warehouse"][name] = col["warehouse"].get(name, 0) + n
+    col["crafts"] = lc.get("crafts") or {}
+    col["building_types"] = sorted({b["type"].split(":")[-1] for b in lc.get("buildings", []) if b.get("type")})
+    for t in col["todo"]:
+        t["maker"] = colony_maker(col, t["what"])
+
+    # Dining Halls and what's on hand for each menu item. None when the export
+    # predates menus (the game needs a /reload to pick up the new script).
+    col["dining"] = None
+    if any("menu" in b for b in lc.get("buildings", [])):
+        col["dining"] = []
+        for b in lc["buildings"]:
+            # The Nether Worker has a menu too (food it packs for trips); that's no Dining Hall.
+            if b.get("menu") is None or b.get("type") != "minecolonies:cook":
+                continue
+            hall = b.get("contents") or {}
+            items = []
+            for name in dict.fromkeys(b["menu"]):
+                raw = COOKED.get(name)
+                items.append({
+                    "name": name, "hall": hall.get(name, 0), "warehouse": col["warehouse"].get(name, 0),
+                    "raw_name": raw,
+                    "raw": (hall.get(raw, 0) + col["warehouse"].get(raw, 0)) if raw else 0,
+                    "maker": colony_maker(col, name),
+                })
+            col["dining"].append({"name": LANG.get(b["name"], b["name"]), "level": b.get("level"),
+                                  "pos": fmt_pos(b.get("pos")), "menu": items})
+
+    if "visitors" in lc:
+        col["visitors"] = [{"name": v["name"], "cost": v.get("cost") or "?", "skills": v.get("skills") or {}}
+                           for v in lc["visitors"]]
+    return col
+
+
+# --- Research -------------------------------------------------------------------
+
+# Research progress units at depth 1 (ResearchConstants.BASE_RESEARCH_TIME); each
+# depth doubles it. The University GUI shows units × 25 / 3600 as hours.
+RESEARCH_BASE = 72
+RESEARCH_DONE, RESEARCH_RUNNING = 2, 1
+
+
+def load_research():
+    """The global research tree from every mod jar (MineColonies, addons):
+    (branches by id, researches by id). Also merges the jars' lang files into
+    LANG, since addon research names live there."""
+    branches, researches = {}, {}
+    for jar in sorted(glob(os.path.join(INSTANCE, "mods", "*.jar"))):
+        try:
+            with zipfile.ZipFile(jar) as z:
+                names = [n for n in z.namelist() if re.match(r"data/[^/]+/researches/.+\.json$", n)]
+                if not names:
+                    continue
+                for n in z.namelist():
+                    if re.match(r"assets/[^/]+/lang/en_us\.json$", n):
+                        for k, v in json.loads(z.read(n)).items():
+                            LANG.setdefault(k, v)
+                effects = {}
+                for n in names:
+                    ns, path = re.match(r"data/([^/]+)/researches/(.+)\.json$", n).groups()
+                    d = json.loads(z.read(n))
+                    rid = f"{ns}:{path}"
+                    if "/" not in path:
+                        branches[rid] = d
+                    elif d.get("effect"):
+                        effects[rid] = d.get("levels") or []
+                    elif "branch" in d:
+                        researches[rid] = dict(d, id=rid)
+                for r in researches.values():
+                    for e in r.get("effects", []):
+                        if e.get("id") in effects:
+                            e["levels"] = effects[e["id"]]
+        except (OSError, KeyError, ValueError):
+            continue
+    return branches, researches
+
+
+def java_format(text, args):
+    """Fill a Java format string ('+%3$s%%', '%s', '%d') with `args`."""
+    seq = iter(args)
+
+    def sub(m):
+        if m.group(0) == "%%":
+            return "%"
+        if m.group(1):
+            i = int(m.group(1)) - 1
+            return str(args[i]) if i < len(args) else ""
+        return str(next(seq, ""))
+    return re.sub(r"%%|%(?:(\d+)\$)?[sd]", sub, text)
+
+
+def research_lang(rid, part):
+    ns, path = rid.split(":", 1)
+    return LANG.get(f"com.{ns}.research.{path.replace('/', '.')}.{part}")
+
+
+def research_name(r):
+    return research_lang(r["id"], "name") or item_name(r["id"].rsplit("/", 1)[-1])
+
+
+def effect_text(e):
+    ns, path = e["id"].split(":", 1)
+    text = LANG.get(f"com.{ns}.research.{path.replace('/', '.')}.description")
+    if not text:
+        return item_name(path.rsplit("/", 1)[-1])
+    levels = e.get("levels") or []
+    lvl = e.get("level", 1)
+    value = levels[lvl - 1] if 0 < lvl <= len(levels) else lvl
+    num = lambda v: f"{v:g}"
+    # GlobalResearchEffect's arguments: the strength, as is and as a percentage.
+    return java_format(text, [num(value), num(value), num(round(value * 100, 1))])
+
+
+def cost_text(c):
+    what = item_name(c["item"]) if c.get("item") else "any " + item_name(c.get("tag", "?"))
+    return f"{c.get('count', 1)} {what}"
+
+
+def requirement_check(req, buildings):
+    """(text, met) for one building requirement. 'building' sums the levels of
+    every hut of that type; 'single-building' needs one hut at that level."""
+    level = req.get("level", 1)
+    types = req.get("alternate-buildings") or [req.get("building", "?")]
+    have = [b["level"] for b in buildings.values() if b["type"] in types]
+    if req.get("type") == "minecolonies:single-building":
+        got = max(have, default=0)
+    else:
+        got = sum(have)
+    names = " or ".join(building_name(t) for t in types)
+    if req.get("type") == "minecolonies:single-building" or len(have) <= 1:
+        text = f"{names} level {level}"
+    else:
+        text = f"{names} levels totalling {level}"
+    return f"{text} (have {got})", got >= level
+
+
+def research_status(r, col, tree, uni_level):
+    """('done'|'running'|'available'|'blocked'|'locked', percent, reasons) for one research."""
+    state = col["research"].get(r["id"], {})
+    need = RESEARCH_BASE * TREE_BRANCHES.get(r["branch"], {}).get("base-time", 1.0) * 2 ** (r["researchLevel"] - 1)
+    if state.get("state") == RESEARCH_DONE:
+        return "done", 100, []
+    if state.get("state") == RESEARCH_RUNNING:
+        return "running", min(99, int(100 * state.get("progress", 0) / max(1, need))), []
+    parent = r.get("parentResearch")
+    if parent and col["research"].get(parent, {}).get("state") != RESEARCH_DONE:
+        return "locked", 0, [f"Research {research_name(tree[parent])} first" if parent in tree else parent]
+    reasons = []
+    # Exclusive parents allow only one of their children.
+    if parent and tree.get(parent, {}).get("exclusiveChildResearch"):
+        taken = [s for s in tree.values() if s.get("parentResearch") == parent and s["id"] != r["id"]
+                 and col["research"].get(s["id"], {}).get("state") in (RESEARCH_DONE, RESEARCH_RUNNING)]
+        if taken:
+            return "locked", 0, [f"Excluded: you picked {research_name(taken[0])}"]
+    if r["researchLevel"] > uni_level:
+        reasons.append(f"University level {min(r['researchLevel'], 5)}" + (" (max)" if r["researchLevel"] == 6 else ""))
+    for req in r.get("requirements", []):
+        text, met = requirement_check(req, col["buildings"])
+        if not met:
+            reasons.append(text)
+    return ("blocked" if reasons else "available"), 0, reasons
+
+
+def research_duration(r):
+    hours = RESEARCH_BASE * TREE_BRANCHES.get(r["branch"], {}).get("base-time", 1.0) \
+        * 2 ** (r["researchLevel"] - 1) * 25 / 3600
+    return f"{hours * 60:.0f} min" if hours < 1 else f"{hours:g} h"
+
+
+TREE_BRANCHES, TREE = load_research()
+
+
+# --- Bounties -------------------------------------------------------------------
+
+# Create Numismatics coins in spurs (Coin enum).
+COIN_SPURS = {"numismatics:spur": 1, "numismatics:bevel": 8, "numismatics:sprocket": 16,
+              "numismatics:cog": 64, "numismatics:crown": 512, "numismatics:sun": 4096}
+BOUNTY_RADIUS = 768      # blocks around you and the Town Hall
+REGION_CACHE = {}        # region path -> (mtime, boards found in it)
+
+
+def region_boards(path, rx, rz):
+    """Bountiful boards saved in one region file: [{'pos', 'bounties'}]."""
+    mtime = os.path.getmtime(path)
+    cached = REGION_CACHE.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    boards = []
+    data = open(path, "rb").read()
+    for i in range(1024):
+        off = struct.unpack(">I", b"\0" + data[i * 4:i * 4 + 3])[0]
+        if not off or data[off * 4096 + 4] != 2:     # 2 = zlib
+            continue
+        p = off * 4096
+        try:
+            raw = zlib.decompress(data[p + 5:p + 4 + struct.unpack(">I", data[p:p + 4])[0]])
+        except zlib.error:
+            continue
+        if b"bountiful:board" not in raw:
+            continue
+        for be in load_nbt(raw).get("block_entities", []):
+            if not str(be.get("id", "")).startswith("bountiful:board"):
+                continue
+            bounties = []
+            for it in be.get("bounty_inv", {}).get("Items", []):
+                comp = it.get("components", {})
+                info = comp.get("bountiful:bounty_info", {})
+                bounties.append({
+                    "rarity": info.get("rarity", "COMMON"),
+                    "expires": info.get("timeStarted", 0) + info.get("timeToComplete", 0) * 20,
+                    "rewards": [(r.get("logicName", ""), r.get("content", "?"), r.get("amount", 1))
+                                for r in comp.get("bountiful:rewards", [])],
+                    "objects": [(o.get("logicName", ""), o.get("content", "?"), o.get("amount", 1))
+                                for o in comp.get("bountiful:objects", [])],
+                })
+            boards.append({"pos": (be.get("x"), be.get("y"), be.get("z")), "bounties": bounties})
+    REGION_CACHE[path] = (mtime, boards)
+    return boards
+
+
+def read_bounties(world, centers):
+    """Boards within BOUNTY_RADIUS of any of `centers` ((x, z) pairs), plus the
+    world's game time (bounty expiry is in game ticks)."""
+    regions = set()
+    for cx, cz in centers:
+        for rx in range((cx - BOUNTY_RADIUS) // 512, (cx + BOUNTY_RADIUS) // 512 + 1):
+            for rz in range((cz - BOUNTY_RADIUS) // 512, (cz + BOUNTY_RADIUS) // 512 + 1):
+                regions.add((rx, rz))
+    boards = []
+    for rx, rz in sorted(regions):
+        path = os.path.join(world, "region", f"r.{rx}.{rz}.mca")
+        if os.path.exists(path) and os.path.getsize(path):
+            try:
+                boards += region_boards(path, rx, rz)
+            except (OSError, ValueError, struct.error, IndexError):
+                continue
+    near = [b for b in boards if any(abs(b["pos"][0] - cx) <= BOUNTY_RADIUS and abs(b["pos"][2] - cz) <= BOUNTY_RADIUS
+                                     for cx, cz in centers)]
+    return near
+
+
+def player_pos(world):
+    """Your saved position (x, z) in the Overworld, or None."""
+    paths = glob(os.path.join(world, "playerdata", "*.dat"))
+    if not paths:
+        return None
+    try:
+        p = load_nbt(max(paths, key=os.path.getmtime))
+    except (OSError, ValueError, struct.error):
+        return None
+    if p.get("Dimension", "minecraft:overworld") != "minecraft:overworld" or len(p.get("Pos", [])) < 3:
+        return None
+    return int(p["Pos"][0]), int(p["Pos"][2])
+
+
+def game_time(world):
+    try:
+        return load_nbt(os.path.join(world, "level.dat"))["Data"]["Time"]
+    except (OSError, ValueError, KeyError, struct.error):
+        return 0
+
+
+def spurs(entries):
+    return sum(COIN_SPURS.get(i, 0) * n for _, i, n in entries)
+
+
+def display_name(item_id):
+    if ASSETS is not None:
+        if not hasattr(ASSETS, "by_id"):
+            ASSETS.by_id = {}
+            for name, iid in ASSETS.names.items():
+                ASSETS.by_id.setdefault(iid, name.title())
+        if item_id in ASSETS.by_id:
+            return ASSETS.by_id[item_id]
+    return item_name(item_id)
+
+
+def entry_text(logic, item_id, n):
+    if "entity" in logic:
+        return f"kill {n} {display_name(item_id)}"
+    if logic and "item" not in logic:
+        return f"{n} {item_name(item_id)} ({logic.split(':')[-1]})"
+    return f"{n} {display_name(item_id)}"
+
+
+def compass(dx, dz):
+    if abs(dx) < 16 and abs(dz) < 16:
+        return "right here"
+    dirs = ["E", "SE", "S", "SW", "W", "NW", "N", "NE"]   # +z is south
+    d = dirs[round(math.atan2(dz, dx) / (math.pi / 4)) % 8]
+    return f"{round(math.hypot(dx, dz))} blocks {d}"
+
+
+HAPPINESS_LABELS = {
+    "homelessness": "No home", "security": "Feels unsafe", "social": "Lonely",
+    "food": "Hungry / poor food", "health": "Unwell", "unemployment": "Unemployed",
+    "idleatjob": "Idle at work", "slepttonight": "Didn't sleep", "school": "No school",
+    "mysticalsite": "No mystical site", "damage": "Got hurt", "death": "Saw a death",
+    "raidwithoutdeath": "Raid", "sleptinbed": "No bed",
+}
+
+
+def weak_label(value, factor):
+    # MineColonies calls it "homelessness", but the value is home level / 3:
+    # 0 only without a home, and below 1 for any home under level 3.
+    if factor == "homelessness" and value > 0:
+        return f"Home only level {round(value * 3)} (wants 3)"
+    return HAPPINESS_LABELS.get(factor, factor)
+
+
+def read_feed(path):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 400_000))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    feed = []
+    for line in lines:
+        m = re.match(r"\[[^\]]*?(\d\d:\d\d:\d\d)[^\]]*\].*\[CHAT\] (.*)", line)
+        if m:
+            feed.append((m.group(1), m.group(2).strip()))
+    return feed[-FEED_LINES:]
+
+
+# --- Game icons -----------------------------------------------------------------
+# Item and block textures straight from the game's jars (vanilla client + mods),
+# found through each item's model so they look like the inventory: flat items
+# as their sprite, blocks as a small isometric cube.
+
+ICON_RENDER = 64   # drawn at 2× the display size so it stays crisp on HiDPI
+ICON_CACHE = os.path.expanduser("~/.cache/colony-monitor/assets.json")
+
+# Request text that names a kind of tool rather than an item.
+TOOL_ICONS = [("pickaxe", "minecraft:iron_pickaxe"), ("axe", "minecraft:iron_axe"),
+              ("shovel", "minecraft:iron_shovel"), ("hoe", "minecraft:iron_hoe"),
+              ("sword", "minecraft:iron_sword"), ("bow", "minecraft:bow"),
+              ("fishing rod", "minecraft:fishing_rod"), ("shears", "minecraft:shears"),
+              ("helmet", "minecraft:iron_helmet"), ("chestplate", "minecraft:iron_chestplate"),
+              ("leggings", "minecraft:iron_leggings"), ("boots", "minecraft:iron_boots"),
+              ("food", "minecraft:bread"), ("fuel", "minecraft:coal"), ("pickup", "minecraft:barrel")]
+
+# An item that stands for each job.
+JOB_ICONS = {
+    "Alchemist": "minecraft:brewing_stand", "Archer": "minecraft:bow", "Baker": "minecraft:bread",
+    "Beekeeper": "minecraft:honeycomb", "Blacksmith": "minecraft:iron_chestplate",
+    "Builder": "minecolonies:sceptergold", "Chef": "minecraft:mushroom_stew", "Chicken Herder": "minecraft:egg",
+    "Composter": "minecraft:bone_meal", "Concrete Mixer": "minecraft:white_concrete_powder",
+    "Cook": "minecraft:cooked_beef", "Waiter": "minecraft:cooked_beef", "Cowhand": "minecraft:milk_bucket", "Crusher": "minecraft:gravel",
+    "Courier": "minecraft:minecart", "Dyer": "minecraft:red_dye", "Enchanter": "minecraft:enchanted_book",
+    "Farmer": "minecraft:wheat", "Fisher": "minecraft:fishing_rod", "Fletcher": "minecraft:arrow",
+    "Florist": "minecraft:poppy", "Glassblower": "minecraft:glass", "Healer": "minecraft:golden_apple",
+    "Knight": "minecraft:iron_sword", "Forester": "minecraft:iron_axe", "Mechanic": "minecraft:redstone",
+    "Miner": "minecraft:iron_pickaxe", "Nether Miner": "minecraft:netherrack", "Planter": "minecraft:sugar_cane",
+    "Quarrier": "minecraft:cobblestone", "Rabbit Herder": "minecraft:rabbit_foot",
+    "Researcher": "minecolonies:ancienttome", "Sawmill": "minecraft:oak_planks", "Shepherd": "minecraft:white_wool",
+    "Sifter": "minecolonies:sifter_mesh_string", "Smelter": "minecraft:iron_ingot", "Stablemaster": "minecraft:saddle",
+    "Stonemason": "minecraft:stone_bricks", "Stone Smeltery": "minecraft:smooth_stone",
+    "Swine Herder": "minecraft:porkchop", "Teacher": "minecraft:book", "Undertaker": "minecraft:iron_shovel",
+}
+
+
+class GameAssets:
+    def __init__(self):
+        mods = sorted(glob(os.path.join(INSTANCE, "mods", "*.jar")))
+        version = next((m.group(1) for j in mods
+                        if (m := re.search(r"minecolonies-[\d.]+-(\d[\d.]*\d)\.jar$", j))), None)
+        client = os.path.join(INSTANCE, "..", "..", "libraries", "net", "minecraft", "client",
+                              str(version), f"client-{version}.jar")
+        # Vanilla first: on a name or path clash, the vanilla asset wins.
+        self.jars = [os.path.normpath(client)] * os.path.exists(client) + mods
+        self.files = {}   # asset path -> jar holding it
+        self.names = {}   # lowercase display name -> item id
+        self.zips = {}
+        self.icons = {}
+        self.load_index()
+
+    def load_index(self):
+        sig = [[j, os.path.getmtime(j)] for j in self.jars]
+        try:
+            with open(ICON_CACHE) as f:
+                cached = json.load(f)
+            if cached["sig"] == sig:
+                self.files, self.names = cached["files"], cached["names"]
+                return
+        except (OSError, ValueError, KeyError):
+            pass
+        for jar in self.jars:
+            try:
+                z = zipfile.ZipFile(jar)
+            except (OSError, zipfile.BadZipFile):
+                continue
+            with z:
+                for n in z.namelist():
+                    if not n.startswith("assets/"):
+                        continue
+                    if ("/models/" in n and n.endswith(".json")) or ("/textures/" in n and n.endswith(".png")):
+                        self.files.setdefault(n, jar)
+                    elif n.endswith("/lang/en_us.json"):
+                        try:
+                            lang = json.loads(z.read(n))
+                        except ValueError:
+                            continue
+                        for key, name in lang.items():
+                            parts = key.split(".")
+                            if len(parts) == 3 and parts[0] in ("item", "block") and isinstance(name, str):
+                                self.names.setdefault(name.lower(), f"{parts[1]}:{parts[2]}")
+        try:
+            os.makedirs(os.path.dirname(ICON_CACHE), exist_ok=True)
+            with open(ICON_CACHE, "w") as f:
+                json.dump({"sig": sig, "files": self.files, "names": self.names}, f)
+        except OSError:
+            pass
+
+    def read(self, asset):
+        jar = self.files.get(asset)
+        if not jar:
+            return None
+        if jar not in self.zips:
+            self.zips[jar] = zipfile.ZipFile(jar)
+        return self.zips[jar].read(asset)
+
+    def model(self, ref):
+        ns, _, path = ref.rpartition(":")
+        data = self.read(f"assets/{ns or 'minecraft'}/models/{path}.json")
+        try:
+            return json.loads(data) if data else None
+        except ValueError:
+            return None
+
+    def textures_for(self, item_id):
+        """('flat', [layers]) or ('cube', [top, side]) as texture refs."""
+        ns, _, path = item_id.partition(":")
+        textures, ref = {}, f"{ns}:item/{path}"
+        for _ in range(12):     # parent chain
+            m = self.model(ref)
+            if m is None:
+                break
+            for k, v in (m.get("textures") or {}).items():
+                textures.setdefault(k, v)
+            ref = m.get("parent")
+            if not ref:
+                break
+
+        def resolve(v):
+            for _ in range(5):
+                if not (isinstance(v, str) and v.startswith("#")):
+                    break
+                v = textures.get(v[1:])
+            return v if isinstance(v, str) and not v.startswith("#") else None
+
+        tex = {k: r for k, v in textures.items() if (r := resolve(v))}
+        layers = [tex[f"layer{i}"] for i in range(5) if f"layer{i}" in tex]
+        if layers:
+            return "flat", layers
+        if tex:
+            def pick(*keys):
+                return next((tex[k] for k in keys if k in tex), next(iter(tex.values())))
+            return "cube", [pick("top", "end", "up", "all", "texture", "particle"),
+                            pick("side", "front", "north", "all", "texture", "particle")]
+        if f"assets/{ns}/textures/item/{path}.png" in self.files:
+            return "flat", [f"{ns}:item/{path}"]
+        if f"assets/{ns}/textures/block/{path}.png" in self.files:
+            return "cube", [f"{ns}:block/{path}"] * 2
+        return None, []
+
+    def surface(self, ref):
+        ns, _, path = ref.rpartition(":")
+        data = self.read(f"assets/{ns or 'minecraft'}/textures/{path}.png")
+        try:
+            return cairo.ImageSurface.create_from_png(io.BytesIO(data)) if data else None
+        except (cairo.Error, MemoryError):
+            return None
+
+    def icon(self, item_id=None, texture=None):
+        """A Gdk.Texture for an item id, or for a raw texture ref; None if unknown."""
+        key = item_id or texture
+        if not key:
+            return None
+        if key not in self.icons:
+            kind, refs = ("flat", [texture]) if texture else self.textures_for(item_id)
+            surfs = [self.surface(r) for r in refs]
+            self.icons[key] = draw_icon(kind, surfs) if surfs and all(surfs) else None
+        return self.icons[key]
+
+    def find(self, text):
+        """Item id for request text like '1-3 Smooth Stone' or '40 × Leather'."""
+        s = re.sub(r"\(.*?\)", "", str(text or ""))
+        s = re.sub(r"^\s*\d+(\s*-\s*\d+)?\s*[×x]?\s+", "", s).strip().lower()
+        if s in self.names:
+            return self.names[s]
+        if s.endswith("s") and s[:-1] in self.names:
+            return self.names[s[:-1]]
+        # Architect's Cutter blocks: show the main material, e.g. "(centre Bricks, frame Spruce Planks)".
+        for part in re.split(r"[,;]", "".join(re.findall(r"\((.*?)\)", str(text or "")))):
+            mat = re.sub(r"^\s*(centre|center|frame|side|top|main)\s+", "", part).strip().lower()
+            if mat in self.names:
+                return self.names[mat]
+        if "architect's cutter" in str(text).lower():
+            return "domum_ornamentum:architectscutter"
+        return next((item for word, item in TOOL_ICONS if word in s), None)
+
+
+def draw_icon(kind, surfs):
+    S = ICON_RENDER
+    out = cairo.ImageSurface(cairo.FORMAT_ARGB32, S, S)
+    ctx = cairo.Context(out)
+
+    def paint(surf, matrix, shade=0.0):
+        w = surf.get_width()   # animated textures are a tall strip; use the first frame
+        ctx.save()
+        ctx.transform(matrix)
+        ctx.scale(16 / w, 16 / w)
+        ctx.rectangle(0, 0, w, w)
+        ctx.clip()
+        ctx.set_source_surface(surf, 0, 0)
+        ctx.get_source().set_filter(cairo.FILTER_NEAREST)
+        ctx.paint()
+        if shade:
+            ctx.set_operator(cairo.OPERATOR_ATOP)
+            ctx.set_source_rgba(0, 0, 0, shade)
+            ctx.paint()
+        ctx.restore()
+
+    if kind == "flat":
+        for surf in surfs:
+            paint(surf, cairo.Matrix(S / 16, 0, 0, S / 16, 0, 0))
+    else:
+        # Matrices map a 16×16 face onto the top, left and right of an isometric cube.
+        top, side = surfs[0], surfs[-1]
+        paint(top, cairo.Matrix(S / 32, -S / 64, S / 32, S / 64, 0, S / 4))
+        paint(side, cairo.Matrix(S / 32, S / 64, 0, S / 32, 0, S / 4), 0.2)
+        paint(side, cairo.Matrix(S / 32, -S / 64, 0, S / 32, S / 2, S / 2), 0.4)
+    out.flush()
+    return Gdk.MemoryTexture.new(S, S, Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
+                                 GLib.Bytes.new(bytes(out.get_data())), out.get_stride())
+
+
+ASSETS = None
+
+
+def game_icon(item_id=None, text=None, texture=None):
+    if ASSETS is None:
+        return None
+    try:
+        return ASSETS.icon(item_id or (ASSETS.find(text) if text else None), texture)
+    except Exception:   # a broken model or jar shouldn't take the window down
+        return None
+
+
+def job_icon(c):
+    return game_icon("minecraft:cookie" if c.get("child") else JOB_ICONS.get(c["job"]))
+
+
+def mood_icon(h):
+    face = "happy" if h >= 8 else "satisfied" if h >= 6 else "unsatisfied" if h >= 4 else "unhappy"
+    return game_icon(texture=f"minecolonies:gui/{face}_icon")
+
+
+# --- UI -------------------------------------------------------------------------
+
+def label(text, css=None, xalign=0.0, wrap=False, ellipsize=False):
+    lbl = Gtk.Label(label=text, xalign=xalign)
+    if wrap:
+        lbl.set_wrap(True)
+        lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    if ellipsize:
+        lbl.set_ellipsize(Pango.EllipsizeMode.END)
+    for c in (css or "").split():
+        lbl.add_css_class(c)
+    return lbl
+
+
+def page(*groups, width=900):
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+    for g in groups:
+        box.append(g)
+    clamp = Adw.Clamp(maximum_size=width, child=box)
+    clamp.set_margin_top(18)
+    clamp.set_margin_bottom(18)
+    clamp.set_margin_start(12)
+    clamp.set_margin_end(12)
+    return Gtk.ScrolledWindow(child=clamp, vexpand=True)
+
+
+def image(icon, size=32):
+    """A themed icon name, or a game texture shown at `size` pixels."""
+    if isinstance(icon, str):
+        return Gtk.Image.new_from_icon_name(icon)
+    img = Gtk.Image.new_from_paintable(icon)
+    img.set_pixel_size(size)
+    return img
+
+
+def row(title, subtitle="", suffix=None, suffix_css=None, icon=None, suffix_icon=None):
+    r = Adw.ActionRow(title=GLib.markup_escape_text(title),
+                      subtitle=GLib.markup_escape_text(subtitle or ""))
+    r.set_subtitle_lines(3)
+    if icon:
+        r.add_prefix(image(icon))
+    if suffix:
+        r.add_suffix(label(suffix, suffix_css, xalign=1.0))
+    if suffix_icon:
+        r.add_suffix(image(suffix_icon, 24))
+    return r
+
+
+def citizen_row(c):
+    sub = c["job"] + (" · child" if c["child"] else "")
+    if c.get("status"):
+        sub += f" · {c['status']}"
+    elif c.get("asleep"):
+        sub += " · Asleep"
+    if c.get("health") is not None and c.get("max_health"):
+        sub += f" · ♥ {c['health']:.0f}/{c['max_health']:.0f}"
+    if c["sick"]:
+        sub += f"\nSICK: {item_name(c['sick'])}" + (f" (cure: {c['cure']})" if c.get("cure") else "")
+    if c["weak"]:
+        sub += " · " + ", ".join(weak_label(raw, w) for _, w, raw in c["weak"][:3])
+    h = c["happiness"]
+    icon = job_icon(c) or ("face-sick-symbolic" if c["sick"] else "avatar-default-symbolic")
+    return row(c["name"], sub, f"{h:.1f}/10", happiness_css(h, c["sick"]), icon, mood_icon(h))
+
+
+def group(title, rows, empty="Nothing here", description=None):
+    g = Adw.PreferencesGroup(title=GLib.markup_escape_text(title))
+    if description:
+        g.set_description(description)
+    if rows:
+        for r in rows:
+            g.add(r)
+    else:
+        g.add(row(empty))
+    return g
+
+
+# What non-crafting workers bring in, by building type. Crafters (Sawmill,
+# Blacksmith, ...) come from the live export's recipe list instead.
+PRODUCERS = {
+    "cowboy": ["Raw Beef", "Leather", "Milk Bucket"],
+    "chickenherder": ["Raw Chicken", "Egg", "Feather"],
+    "shepherd": ["Raw Mutton", "White Wool"],
+    "swineherder": ["Raw Porkchop"],
+    "rabbithutch": ["Raw Rabbit", "Rabbit Hide"],
+    "fisherman": ["Raw Cod", "Raw Salmon"],
+    "farmer": ["Wheat", "Wheat Seeds", "Potato", "Carrot", "Beetroot", "Pumpkin", "Melon Slice"],
+    "miner": ["Cobblestone", "Cobbled Deepslate", "Raw Iron", "Raw Copper", "Raw Gold", "Coal",
+              "Diamond", "Redstone Dust", "Lapis Lazuli", "Emerald", "Gravel", "Dirt"],
+}
+# The Dining Hall cooks these itself once the raw food arrives.
+COOKED = {"Steak": "Raw Beef", "Cooked Chicken": "Raw Chicken", "Cooked Porkchop": "Raw Porkchop",
+          "Cooked Mutton": "Raw Mutton", "Cooked Rabbit": "Raw Rabbit", "Cooked Cod": "Raw Cod",
+          "Cooked Salmon": "Raw Salmon", "Baked Potato": "Potato", "Fried Egg": "Egg"}
+
+
+def colony_maker(col, what):
+    """The colony building that can supply an item named in a request ("1-48 Raw
+    Beef"), or None when only the player can."""
+    name = re.sub(r"\s*\(.*\)$", "", re.sub(r"^\d+(-\d+)?\s+", "", what or "")).strip()
+    makers = {item: LANG.get(who, who) for item, who in (col.get("crafts") or {}).items()}
+    for b in col.get("building_types", []):
+        for item in PRODUCERS.get(b, []):
+            makers.setdefault(item, building_name(b))
+    if name in makers:
+        return makers[name]
+    if "cook" in col.get("building_types", []) and COOKED.get(name) in makers:
+        return f"{building_name('cook')} (from {COOKED[name]})"
+    if name.endswith((" Log", " Sapling")) and "lumberjack" in col.get("building_types", []):
+        return building_name("lumberjack")
+    return None
+
+
+def player_todo(col):
+    """What needs the player: requests the colony can't fill (None without the
+    live export), sick citizens, unemployed adults, and complaints that need
+    building work, grouped by text."""
+    sick = [c for c in col["citizens"] if c["sick"]]
+    idle = [c for c in col["citizens"] if c["job"] == "Unemployed" and not c["child"]]
+    by_text = {}
+    for c in col["citizens"]:
+        for q in c["complaints"]:
+            # Item shortages already show up as requests.
+            if "continue working" not in q["text"]:
+                by_text.setdefault(q["text"], []).append(c["name"])
+    todo = col.get("todo")
+    if todo is not None:
+        todo = [t for t in todo if not t.get("maker")]
+    return todo, sick, idle, by_text
+
+
+# Food: a Dining Hall is running low below this many servings per citizen on
+# hand (in the hall, the warehouse, or raw in either waiting to be cooked).
+FOOD_LOW_PER_CITIZEN = 2
+# Citizen saturation: at 0 they stop working and wait at the Dining Hall.
+STARVING, HUNGRY = 0, 6
+
+
+def food_report(col):
+    """Each Dining Hall with its servings on hand and a level ('error' out of
+    food or no menu, 'warning' running low, 'success' fine), and each menu
+    item's supply and level, scarcest first. None without the live export.
+    Halls share the warehouse, so with several its stock counts for each."""
+    if col.get("dining") is None:
+        return None
+    people = max(1, len(col["citizens"]))
+    report = []
+    for d in col["dining"]:
+        menu = d["menu"]
+        # Each item's fair share of the hall's target, so one plentiful dish
+        # doesn't hide the others running out.
+        share = FOOD_LOW_PER_CITIZEN * people / max(1, len(menu))
+        items = []
+        for it in menu:
+            supply = it["hall"] + it["warehouse"] + it["raw"]
+            level = "error" if supply == 0 else "warning" if supply < share else "success"
+            items.append(dict(it, supply=supply, level=level))
+        items.sort(key=lambda it: it["supply"])
+        meals = sum(it["supply"] for it in items)
+        per = meals / people
+        level = ("error" if not menu or meals == 0 else
+                 "warning" if per < FOOD_LOW_PER_CITIZEN or any(it["level"] == "error" for it in items) else
+                 "success")
+        report.append(dict(d, items=items, meals=meals, per=per, level=level,
+                           in_hall=sum(it["hall"] for it in items)))
+    return report
+
+
+def hungry_citizens(col):
+    return sorted((c for c in col["citizens"] if (c.get("saturation") or 0) <= HUNGRY),
+                  key=lambda c: c.get("saturation") or 0)
+
+
+def beds_text(col):
+    """'18/18 citizens · no free beds', or just the count when the live export
+    (the only source of bed capacity) is missing."""
+    n = len(col["citizens"])
+    housing = col.get("housing")
+    if not housing:
+        return f"{n} citizens"
+    free = housing["max"] - n
+    text = f"{n}/{housing['max']} citizens · " + (f"{free} free bed{'s' * (free != 1)}" if free > 0 else "no free beds")
+    if housing["potential"] > housing["max"]:
+        text += f" (+{housing['potential'] - housing['max']} in empty guard towers)"
+    return text
+
+
+def happiness_css(h, sick=False):
+    return "error" if sick or h < 5 else "warning" if h < 7.5 else "success"
+
+
+# (name, title, fallback icon, game item for the icon)
+SECTIONS = (("dashboard", "Dashboard", "view-grid-symbolic", "minecolonies:clipboard"),
+            ("todo", "To do", "object-select-symbolic", "minecraft:writable_book"),
+            ("food", "Food", "emoji-food-symbolic", "minecraft:bread"),
+            ("requests", "Requests", "mail-send-receive-symbolic", "minecraft:barrel"),
+            ("citizens", "Citizens", "system-users-symbolic", "minecraft:name_tag"),
+            ("complaints", "Complaints", "dialog-warning-symbolic", None),
+            ("visitors", "Visitors", "contact-new-symbolic", "minecraft:emerald"),
+            ("bounties", "Bounties", "starred-symbolic", "bountiful:bountyboard"),
+            ("research", "Research", "accessories-dictionary-symbolic", "minecolonies:blockhutuniversity"),
+            ("feed", "Feed", "format-justify-left-symbolic", "minecraft:oak_sign"))
+COMPLAINT_ICON = "minecolonies:gui/unhappy_icon"
+
+
+class Monitor(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Colony Monitor", default_width=1100, default_height=820)
+        self.save_path = None
+        self.mtimes = (None, None, None)
+        self.last_colony = None
+        self.col = None
+        self.last_feed = None
+        self.last_research = None
+        self.research_branch = None
+
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, hexpand=True)
+        self.subtitle = Adw.WindowTitle(title="Colony Monitor", subtitle="Loading…")
+        header = Adw.HeaderBar(title_widget=self.subtitle)
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Reload now")
+        refresh.connect("clicked", lambda *_: self.reload(force=True))
+        header.pack_end(refresh)
+
+        # Sidebar: one row per section, with a count of what's in it.
+        self.nav = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.nav.add_css_class("navigation-sidebar")
+        self.nav.connect("row-selected", lambda _, r: r and self.stack.set_visible_child_name(r.get_name()))
+        self.pages = {}
+        for name, title, icon, item in SECTIONS:
+            holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            self.stack.add_named(holder, name)
+            box = Gtk.Box(spacing=12, margin_top=6, margin_bottom=6, margin_start=6, margin_end=6)
+            game = game_icon(item) if item else game_icon(texture=COMPLAINT_ICON)
+            box.append(image(game or icon, 24))
+            title_lbl = label(title)
+            title_lbl.set_hexpand(True)
+            box.append(title_lbl)
+            badge = label("", "dim-label numeric", xalign=1.0)
+            box.append(badge)
+            r = Gtk.ListBoxRow(child=box)
+            r.set_name(name)
+            self.nav.append(r)
+            self.pages[name] = (holder, badge, r)
+        sidebar = Gtk.ScrolledWindow(child=self.nav, width_request=210,
+                                     hscrollbar_policy=Gtk.PolicyType.NEVER)
+
+        self.banner = Adw.Banner()
+        body = Gtk.Box()
+        body.append(sidebar)
+        body.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        body.append(self.stack)
+        view = Adw.ToolbarView(content=body)
+        view.add_top_bar(header)
+        view.add_top_bar(self.banner)
+        self.set_content(view)
+
+        self.go("dashboard")
+        self.reload(force=True)
+        GLib.timeout_add_seconds(POLL_SECONDS, self.reload)
+
+    def go(self, name):
+        self.nav.select_row(self.pages[name][2])
+
+    def set_page(self, name, widget, badge=0, alert=True):
+        holder, badge_lbl, _ = self.pages[name]
+        child = holder.get_first_child()
+        scrolls = isinstance(widget, Gtk.ScrolledWindow)
+        scroll = child.get_vadjustment().get_value() if scrolls and isinstance(child, Gtk.ScrolledWindow) else 0
+        if child:
+            holder.remove(child)
+        holder.append(widget)
+        # Live data refreshes every few seconds; keep the reader's place.
+        if scrolls:
+            GLib.idle_add(lambda: widget.get_vadjustment().set_value(scroll) and False)
+        badge_lbl.set_label(str(badge) if badge else "")
+        if alert and badge:
+            badge_lbl.add_css_class("warning")
+        else:
+            badge_lbl.remove_css_class("warning")
+
+    def reload(self, force=False):
+        self.save_path = find_save()
+        log = os.path.join(INSTANCE, "logs", "latest.log")
+        mt = lambda p: os.path.getmtime(p) if p and os.path.exists(p) else None
+        mtimes = (mt(self.save_path), mt(log), mt(LIVE_EXPORT))
+        if not force and mtimes == self.mtimes:
+            return True
+        colony_changed = force or mtimes[0] != self.mtimes[0] or mtimes[2] != self.mtimes[2]
+        self.mtimes = mtimes
+
+        if colony_changed:
+            if not self.save_path:
+                self.banner.set_title("No MineColonies world found in this instance")
+                self.banner.set_revealed(True)
+            else:
+                try:
+                    col = read_colony(self.save_path)
+                    live = read_live(LIVE_EXPORT)
+                    if live:
+                        col = apply_live(col, live)
+                    self.render_colony(col, mtimes[0])
+                    # Boards live in region files, which change without the colony changing.
+                    self.render_bounties(self.col)
+                    self.banner.set_revealed(False)
+                except Exception as e:  # mid-write or unexpected layout: keep the last view
+                    self.banner.set_title(f"Couldn't read the colony ({e}); retrying")
+                    self.banner.set_revealed(True)
+                    self.mtimes = (None, mtimes[1], None)
+        self.render_feed(read_feed(log))
+        return True
+
+    def render_colony(self, col, saved_at):
+        # "buildings" is keyed by position tuples (not JSON-able) and isn't shown anyway.
+        snapshot = json.dumps({k: v for k, v in col.items() if k != "buildings"}, sort_keys=True, default=str)
+        if snapshot == self.last_colony:
+            return
+        self.last_colony = snapshot
+        self.col = col
+
+        world = os.path.basename(os.path.dirname(os.path.dirname(self.save_path)))
+        fresh = "live" if col.get("live") else f"saved {time.strftime('%H:%M', time.localtime(saved_at))}"
+        self.subtitle.set_title(f"{col['name']} · day {col['day']}")
+        self.subtitle.set_subtitle(f"{world} · {fresh} · {beds_text(col)}")
+
+        self.render_todo(col)
+        self.render_food(col)
+
+        # Requests + work orders
+        self.set_page("requests", page(
+            group("Open requests", [self.request_row(r) for r in col["requests"]],
+                  "No open requests: everyone has what they need"),
+            group("Builder work orders", [self.order_row(o) for o in col["orders"]], "No work orders")),
+            len(col["requests"]), alert=False)
+
+        # Citizens: sick first, then unhappiest
+        cits = sorted(col["citizens"], key=lambda c: (not c["sick"], c["happiness"]))
+        sick = sum(1 for c in col["citizens"] if c["sick"])
+        avg = sum(c["happiness"] for c in col["citizens"]) / max(1, len(col["citizens"]))
+        self.set_page("citizens", page(group(
+            "Citizens", [citizen_row(c) for c in cits], "No citizens",
+            f"Average happiness {avg:.1f}/10 · {sick} sick")), sick)
+
+        # Complaints, grouped by text
+        by_text = {}
+        for c in col["citizens"]:
+            for q in c["complaints"]:
+                by_text.setdefault(q["text"], []).append(c["name"])
+        comp_rows = [row(text, ", ".join(names), f"×{len(names)}", "warning", game_icon(texture=COMPLAINT_ICON))
+                     for text, names in sorted(by_text.items(), key=lambda kv: -len(kv[1]))]
+        self.set_page("complaints", page(group(
+            "What citizens are saying", comp_rows, "No complaints")), len(by_text))
+
+        # Tavern visitors: recruitable for an item; strongest first
+        vis_rows = []
+        have = colony_jobs(col.get("buildings", {}))
+        for v in sorted(col.get("visitors", []), key=lambda v: -sum(v["skills"].values())):
+            top = sorted(v["skills"].items(), key=lambda kv: -kv[1])[:3]
+            sub = " · ".join(f"{name} {lvl}" for name, lvl in top)
+            if v["skills"]:
+                if have:
+                    sub += "\nYour huts: " + ", ".join(f"{j} {s}" for j, s in best_jobs(v["skills"], only=have))
+                sub += "\nAny job: " + ", ".join(f"{j} {s}" for j, s in best_jobs(v["skills"]))
+            vis_rows.append(row(v["name"], sub, f"Recruit: {v['cost']}", "accent",
+                                game_icon(text=v["cost"]) or "contact-new-symbolic"))
+        self.set_page("visitors", page(group(
+            "Visitors at the Tavern", vis_rows, "No visitors right now",
+            "Talk to a visitor and hand over the item to make them a citizen (needs a free bed)")),
+            len(vis_rows), alert=False)
+
+        self.render_research(col)
+        self.render_dashboard()
+
+    @staticmethod
+    def food_row(it, hall=None):
+        """A menu item: total on hand, and where it is."""
+        parts = []
+        if hall:
+            parts.append(hall)
+        parts.append(f"{it['hall']} in the hall · {it['warehouse']} in the warehouse")
+        if it["raw"]:
+            parts.append(f"{it['raw']} {it['raw_name']} to cook")
+        sub = " · ".join(parts)
+        if it["level"] != "success":
+            sub += "\n" + (f"Made by {it['maker']}" if it["maker"] else
+                           "Nobody in the colony makes this: bring some or take it off the menu")
+        return row(it["name"], sub, str(it["supply"]), it["level"], game_icon(text=it["name"]) or "emoji-food-symbolic")
+
+    @staticmethod
+    def hungry_row(c):
+        sat = c.get("saturation") or 0
+        sub = c["job"] + (f" · {c['status']}" if c.get("status") else "")
+        return row(c["name"], sub, f"{sat:.1f}", "error" if sat <= STARVING else "warning",
+                   job_icon(c) or "avatar-default-symbolic")
+
+    def render_food(self, col):
+        report = food_report(col)
+        hungry = hungry_citizens(col)
+        groups = []
+        if report is None:
+            groups.append(group("Dining Halls", [], "Start the game (run /reload once after updating "
+                                "colony_export.js) to see Dining Hall menus"))
+        elif not report:
+            groups.append(group("Dining Halls", [], "No Dining Hall: citizens feed themselves poorly without one"))
+        for d in report or []:
+            status = {"error": "OUT OF FOOD" if d["menu"] else "NOTHING ON THE MENU",
+                      "warning": "running low", "success": "well stocked"}[d["level"]]
+            desc = (f"{status.capitalize() if status.islower() else status} · {d['meals']} servings on hand "
+                    f"({d['in_hall']} in the hall) for {len(col['citizens'])} citizens, ≈ {d['per']:.1f} each")
+            groups.append(group(f"{d['name']} · {d['pos']}", [self.food_row(it) for it in d["items"]],
+                                "Nothing on the menu: the cook only fetches what's on it", desc))
+        groups.append(group("Hungry citizens", [self.hungry_row(c) for c in hungry], "Everyone has eaten",
+                            f"Saturation {HUNGRY} or below, hungriest first. At {STARVING} a citizen stops "
+                            "working and waits at the Dining Hall until it serves food."))
+        trouble = sum(1 for d in report or [] for it in d["items"] if it["level"] != "success")
+        trouble += sum(1 for d in report or [] if not d["menu"])
+        self.set_page("food", page(*groups), trouble + sum(1 for c in hungry if (c.get("saturation") or 0) <= STARVING))
+
+    @staticmethod
+    def request_row(r):
+        sub = r["who"] + (f" · {r['worker']}" if r["worker"] else "")
+        if r.get("items"):
+            sub += ("\nIn the hut: " if r.get("pickup") else "\n") + ", ".join(r["items"])
+        if r.get("resolver") and not r.get("pickup"):
+            sub += f"\nHandled by: {r['resolver']}"
+        if r.get("waiting"):
+            sub += "\nWaiting on: " + ", ".join(r["waiting"])
+        icon = game_icon("minecraft:barrel" if r.get("pickup") else None, text=r["what"])
+        return row(r["what"], sub, r["state"], "dim-label", icon or "package-x-generic-symbolic")
+
+    @staticmethod
+    def order_row(o):
+        return row(f"{o['what']} ({o['level']})",
+                   f"{o['builder']} · at {o['pos']}" + (f" · {o['resources']} blocks" if o["resources"] else ""),
+                   o["stage"], "accent", game_icon("minecolonies:sceptergold") or "applications-engineering-symbolic")
+
+    @staticmethod
+    def todo_row(t):
+        sub = t["who"] + (f" · {t['worker']}" if t["worker"] else "")
+        if t["items"] and t["items"] != [t["what"]]:
+            sub += "\n" + ", ".join(t["items"])
+        if t.get("maker"):
+            return row(t["what"], sub + f"\nMade by: {t['maker']}", "Colony", "dim-label",
+                       game_icon(text=t["what"]) or "package-x-generic-symbolic")
+        if t["retrying"]:
+            sub += "\nNobody in the colony can supply this; it keeps retrying"
+        return row(t["what"], sub, "Retrying" if t["retrying"] else "You",
+                   "warning" if t["retrying"] else "accent",
+                   game_icon(text=t["what"]) or "package-x-generic-symbolic")
+
+    @staticmethod
+    def cure_row(c):
+        return row(f"{c['name']}: {item_name(c['sick'])}",
+                   f"Bring: {c['cure']}" if c.get("cure") else "Check the Hospital", None, None,
+                   game_icon(text=c.get("cure")) or game_icon("minecraft:golden_apple") or "face-sick-symbolic")
+
+    @staticmethod
+    def fix_rows(idle, by_text):
+        rows = [row(f"Give {c['name']} a job", "Unemployed citizens get unhappy", None, None,
+                    game_icon("minecraft:name_tag") or "system-users-symbolic") for c in idle]
+        rows += [row(text, ", ".join(names), f"×{len(names)}", "warning",
+                     game_icon(texture=COMPLAINT_ICON) or "dialog-warning-symbolic")
+                 for text, names in sorted(by_text.items(), key=lambda kv: -len(kv[1]))]
+        return rows
+
+    def render_todo(self, col):
+        """Only what needs the player: requests the colony can't fill, sick
+        citizens, unemployed citizens and complaints that need building work."""
+        todo, sick, idle, by_text = player_todo(col)
+        groups = []
+        if todo is None:
+            groups.append(group("Bring to the colony", [], "Start the game to see what the colony needs from you",
+                                "Needs the live in-game export"))
+            todo = []
+        else:
+            others = len(col["requests"])
+            groups.append(group("Bring to the colony", [self.todo_row(t) for t in todo],
+                                "Nothing: the Warehouse and couriers have it covered",
+                                f"The colony is handling {others} other request{'s' * (others != 1)} by itself"
+                                if others else None))
+        waiting = [t for t in col.get("todo") or [] if t.get("maker")]
+        if waiting:
+            groups.append(group("The colony makes these itself", [self.todo_row(t) for t in waiting],
+                                description="Nobody had them ready yet; they're waiting on the worker named"))
+        groups.append(group("Cure", [self.cure_row(c) for c in sick], "Nobody is sick"))
+        groups.append(group("Fix in the colony", self.fix_rows(idle, by_text), "Nothing to fix"))
+        self.set_page("todo", page(*groups), len(todo) + len(sick) + len(idle) + len(by_text))
+
+    # status -> (label, css)
+    RESEARCH_BADGES = {"done": ("Done", "success"), "running": (None, "accent"),
+                       "available": ("Can start", "accent"), "blocked": ("Needs", "warning"),
+                       "locked": ("Locked", "dim-label")}
+
+    @classmethod
+    def research_row(cls, r, status, percent, reasons, depth):
+        bits = [f"Cost: {', '.join(cost_text(c) for c in r['costs'])}" if r.get("costs") else "Free",
+                research_duration(r)]
+        lines = [" · ".join(bits)]
+        effects = [effect_text(e) for e in r.get("effects", [])]
+        if effects:
+            lines.append("→ " + ", ".join(effects))
+        reqs = [requirement_check(q, {})[0].split(" (have")[0] for q in r.get("requirements", [])]
+        if status in ("blocked", "locked") and reasons:
+            lines.append("Needs: " + ", ".join(reasons))
+        elif reqs and status != "done":
+            lines.append("Requires: " + ", ".join(reqs))
+        if r.get("exclusiveChildResearch"):
+            lines.append("Only one of its follow-ups can be researched")
+        text, css = cls.RESEARCH_BADGES[status]
+        if status == "running":
+            text = f"{percent}%"
+        r_row = row(research_name(r), "\n".join(lines), text, css)
+        r_row.set_subtitle_lines(4)
+        # Indent by depth so each research sits under the one it follows.
+        prefix = Gtk.Box(spacing=8)
+        prefix.append(Gtk.Box(width_request=28 * (depth - 1)))
+        icon = game_icon(r.get("icon"))
+        prefix.append(image(icon or ("emblem-ok-symbolic" if status == "done" else "view-list-symbolic"), 28))
+        r_row.add_prefix(prefix)
+        if status in ("blocked", "locked"):
+            r_row.add_css_class("dim-label")
+        return r_row
+
+    def render_research(self, col):
+        """Every research branch as a tree (children under their parent), with
+        what each costs, unlocks and still needs before it can start."""
+        uni = max((b["level"] for b in col["buildings"].values() if b["type"] == "minecolonies:university"),
+                  default=0)
+        uni_level = 6 if uni >= 5 else uni
+        key = json.dumps([col["research"], uni, sorted((b["type"], b["level"]) for b in col["buildings"].values())],
+                         sort_keys=True)
+        if key == self.last_research:
+            return
+        self.last_research = key
+
+        children = {}
+        for r in TREE.values():
+            children.setdefault(r.get("parentResearch"), []).append(r)
+        order = lambda r: (r.get("sortOrder", 999), research_name(r))
+        stack = Adw.ViewStack(vexpand=True)
+        startable = running = 0
+        for bid, b in sorted(TREE_BRANCHES.items(), key=lambda kv: kv[1].get("sortOrder", 999)):
+            if b.get("hidden"):
+                continue
+            rows, counts = [], {}
+
+            def add(r, depth):
+                status, percent, reasons = research_status(r, col, TREE, uni_level)
+                counts[status] = counts.get(status, 0) + 1
+                rows.append(self.research_row(r, status, percent, reasons, depth))
+                for child in sorted(children.get(r["id"], []), key=order):
+                    add(child, depth + 1)
+
+            for r in sorted((r for r in TREE.values() if r["branch"] == bid and not r.get("parentResearch")), key=order):
+                add(r, 1)
+            if not rows:
+                continue
+            startable += counts.get("available", 0)
+            running += counts.get("running", 0)
+            name = LANG.get(b.get("branch-name", ""), item_name(bid))
+            summary = (f"{counts.get('done', 0)} of {len(rows)} done · {counts.get('running', 0)} in progress · "
+                       f"{counts.get('available', 0)} can start now")
+            stack.add_titled_with_icon(page(group(name, rows, description=summary)), bid, name,
+                                       "emblem-ok-symbolic" if counts.get("done", 0) == len(rows) else
+                                       "view-list-symbolic")
+        if self.research_branch and stack.get_child_by_name(self.research_branch):
+            stack.set_visible_child_name(self.research_branch)
+        stack.connect("notify::visible-child-name",
+                      lambda s, _: setattr(self, "research_branch", s.get_visible_child_name()))
+
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=12, margin_start=12,
+                         margin_end=12)
+        header.append(Adw.ViewSwitcher(stack=stack, policy=Adw.ViewSwitcherPolicy.WIDE))
+        header.append(label(f"University level {uni or 'not built'} · {running} in progress · "
+                            f"{startable} can start now (University depth limit: {uni_level})"
+                            if uni else "Build a University to start research", "dim-label", xalign=0.5))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.append(header)
+        box.append(stack)
+        self.set_page("research", box, startable, alert=False)
+
+    def render_bounties(self, col):
+        """Bounty boards near you and the Town Hall, best coin rewards first,
+        with what the Warehouse already holds towards each one."""
+        world = os.path.dirname(os.path.dirname(self.save_path))
+        hall = next((b["pos"] for b in col["buildings"].values() if b["type"] == "minecolonies:townhall"), None)
+        me = player_pos(world)
+        centers = [c for c in (me, (hall[0], hall[2]) if hall else None) if c]
+        boards = read_bounties(world, centers) if centers else []
+        now = game_time(world)
+        stock = {}
+        for name, n in (col.get("warehouse") or {}).items():
+            iid = (ASSETS.find(name) if ASSETS else None) or name.lower()
+            stock[iid] = stock.get(iid, 0) + n
+        key = json.dumps([boards, now, stock, me], default=str)
+        if key == getattr(self, "last_bounties", None):
+            return
+        self.last_bounties = key
+
+        origin = centers[0] if centers else (0, 0)
+        offers = []
+        for b in boards:
+            for bounty in b["bounties"]:
+                if bounty["expires"] and bounty["expires"] < now:
+                    continue
+                value = spurs(bounty["rewards"]) - spurs(bounty["objects"])
+                if spurs(bounty["rewards"]) == 0 or value <= 0:
+                    continue
+                have = [(min(stock.get(i, 0), n), n) for logic, i, n in bounty["objects"]
+                        if "item" in logic and i not in COIN_SPURS]
+                ready = all(got >= n for got, n in have) and len(have) == len(
+                    [o for o in bounty["objects"] if o[1] not in COIN_SPURS])
+                offers.append((value, ready, b, bounty, have))
+        offers.sort(key=lambda o: (-o[1], -o[0]))
+
+        rows = []
+        for value, ready, b, bounty, have in offers:
+            bring = []
+            for logic, i, n in bounty["objects"]:
+                text = entry_text(logic, i, n)
+                if "item" in logic and i not in COIN_SPURS:
+                    text += f" (Warehouse {min(stock.get(i, 0), n)}/{n})"
+                bring.append(text)
+            left = (bounty["expires"] - now) // 20 // 60 if bounty["expires"] else None
+            where = compass(b["pos"][0] - origin[0], b["pos"][2] - origin[1])
+            sub = (f"Bring: {', '.join(bring)}\nReward: {', '.join(entry_text(*r) for r in bounty['rewards'])}"
+                   f"\nBoard at {fmt_pos(b['pos'])} · {where}" + (f" · ~{left} min left" if left is not None else ""))
+            coin = next((i for _, i, _ in bounty["rewards"] if i in COIN_SPURS), None)
+            r = row(f"{value} spurs" + (" · Warehouse has everything" if ready else ""), sub,
+                    "Ready" if ready else bounty["rarity"].title(), "success" if ready else "dim-label",
+                    game_icon(coin) or "starred-symbolic")
+            r.set_subtitle_lines(4)
+            rows.append(r)
+
+        board_rows = [row(f"Board at {fmt_pos(b['pos'])}",
+                          f"{compass(b['pos'][0] - origin[0], b['pos'][2] - origin[1])} · "
+                          f"{len(b['bounties'])} bounties" if b["bounties"] else
+                          f"{compass(b['pos'][0] - origin[0], b['pos'][2] - origin[1])} · never visited (no bounties yet)",
+                          icon=game_icon("bountiful:bountyboard") or "starred-symbolic")
+                      for b in sorted(boards, key=lambda b: math.hypot(b["pos"][0] - origin[0], b["pos"][2] - origin[1]))]
+        ready_n = sum(1 for o in offers if o[1])
+        self.set_page("bounties", page(
+            group("Bounties paying coins", rows, "No coin bounties on nearby boards right now",
+                  f"Best first; ready-to-hand-in ones on top. Net value counts out any coins a bounty asks for. "
+                  f"From the last save; distances from {'you' if me else 'the Town Hall'}. "
+                  f"Boards only roll new bounties while you're nearby."),
+            group("Boards nearby", board_rows, f"No bounty boards within {BOUNTY_RADIUS} blocks")),
+            ready_n, alert=bool(ready_n))
+
+    def tile(self, value, caption, target, css="", icon=None):
+        top = Gtk.Box(spacing=12)
+        if icon:
+            top.append(image(icon, 32))
+        top.append(label(str(value), f"title-1 numeric {css}"))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=14, margin_bottom=14,
+                      margin_start=16, margin_end=16)
+        box.append(top)
+        box.append(label(caption, "dim-label"))
+        button = Gtk.Button(child=box, tooltip_text=f"Open {target.title()}")
+        button.add_css_class("card")
+        button.connect("clicked", lambda *_: self.go(target))
+        return button
+
+    def preview(self, title, rows, empty, target, total):
+        g = group(title, rows, empty)
+        if total > len(rows):
+            more = Gtk.Button(label=f"See all {total}", valign=Gtk.Align.CENTER)
+        else:
+            more = Gtk.Button(icon_name="go-next-symbolic", tooltip_text="Open", valign=Gtk.Align.CENTER)
+        more.add_css_class("flat")
+        more.connect("clicked", lambda *_: self.go(target))
+        g.set_header_suffix(more)
+        g.set_valign(Gtk.Align.START)
+        return g
+
+    def render_dashboard(self):
+        """Headline numbers (each opens its section) and a short preview of each section."""
+        col = self.col
+        if col is None:
+            return
+        todo, sick, idle, by_text = player_todo(col)
+        # Builders first: their missing materials hold up construction.
+        bring = sorted(todo or [], key=lambda t: "Builder" not in t["who"])
+        cits = col["citizens"]
+        housing = col.get("housing")
+        avg = sum(c["happiness"] for c in cits) / max(1, len(cits))
+        need =len(bring) + len(sick) + len(idle) + len(by_text)
+        # Same count as the Complaints section (which also lists item shortages).
+        complaints = len({q["text"] for c in cits for q in c["complaints"]})
+        food = food_report(col)
+        worst = (min(food, key=lambda d: ("error", "warning", "success").index(d["level"]))
+                 if food else None)
+
+        tiles = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                            min_children_per_line=2, max_children_per_line=5,
+                            column_spacing=12, row_spacing=12)
+        for t in (self.tile(need, "Need you", "todo", "warning" if need else "success",
+                            game_icon("minecraft:writable_book")),
+                  self.tile(len(col["requests"]), "Open requests", "requests", "", game_icon("minecraft:barrel")),
+                  self.tile(len(col["orders"]), "Builder work orders", "requests", "accent",
+                            game_icon("minecolonies:sceptergold")),
+                  self.tile(f"{len(cits)}/{housing['max']}" if housing else len(cits),
+                            "Citizens / beds" if housing else "Citizens", "citizens",
+                            ("success" if housing["max"] > len(cits) else "warning") if housing else "",
+                            game_icon("minecraft:name_tag")),
+                  self.tile(f"{avg:.1f}", "Average happiness", "citizens", happiness_css(avg), mood_icon(avg)),
+                  self.tile(f"{worst['per']:.1f}" if worst else "–",
+                            f"Servings per citizen ({worst['name']})" if worst else "Servings per citizen",
+                            "food", worst["level"] if worst else "", game_icon("minecraft:bread")),
+                  self.tile(len(sick), "Sick", "citizens", "error" if sick else "success",
+                            game_icon("minecraft:golden_apple")),
+                  self.tile(complaints, "Complaints", "complaints", "warning" if complaints else "success",
+                            game_icon(texture=COMPLAINT_ICON)),
+                  self.tile(len(col.get("visitors", [])), "Visitors at the Tavern", "visitors", "",
+                            game_icon("minecraft:emerald"))):
+            tiles.append(t)
+
+        n = 5
+        needs_rows = ([self.todo_row(t) for t in bring] + [self.cure_row(c) for c in sick]
+                      + self.fix_rows(idle, by_text))
+        unhappy = sorted(cits, key=lambda c: (not c["sick"], c["happiness"]))
+        feed = list(reversed(self.last_feed or []))
+        # Two columns side by side: what to act on, and how the colony is doing.
+        left = (self.preview("Needs you", needs_rows[:n],
+                             "Nothing to do" if todo is not None else "Start the game to see what's needed",
+                             "todo", len(needs_rows)),
+                self.preview("Food running low",
+                             [self.food_row(it, d["name"]) for d in food or [] for it in d["items"]
+                              if it["level"] != "success"][:n],
+                             "Start the game to see Dining Hall menus" if food is None else
+                             "Every Dining Hall is well stocked",
+                             "food", sum(1 for d in food or [] for it in d["items"] if it["level"] != "success")),
+                self.preview("Being built", [self.order_row(o) for o in col["orders"][:n]], "No work orders",
+                             "requests", len(col["orders"])))
+        right = (self.preview("Lowest happiness", [citizen_row(c) for c in unhappy[:n]], "No citizens",
+                              "citizens", len(unhappy)),
+                 self.preview("Latest chat", [row(text, when, icon=game_icon("minecraft:oak_sign"))
+                                              for when, text in feed[:n]],
+                              "Nothing yet; start the game", "feed", len(feed)))
+        previews = Gtk.Box(spacing=18, homogeneous=True)
+        for groups in (left, right):
+            column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, valign=Gtk.Align.START)
+            for g in groups:
+                column.append(g)
+            previews.append(column)
+        self.set_page("dashboard", page(tiles, previews, width=1400))
+
+    def render_feed(self, feed):
+        # The log grows constantly; only rebuild (and lose scroll) when chat changed.
+        if feed == self.last_feed:
+            return
+        self.last_feed = feed
+        sign = game_icon("minecraft:oak_sign")
+        rows = [row(text, when, icon=sign) for when, text in reversed(feed)]
+        self.set_page("feed", page(group("Colony chat (newest first)", rows,
+                                         "Nothing yet; start the game")))
+        self.render_dashboard()
+
+
+class App(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="io.lajna.ColonyMonitor")
+
+    def do_activate(self):
+        win = self.props.active_window or Monitor(self)
+        win.present()
+
+
+if __name__ == "__main__":
+    try:
+        ASSETS = GameAssets()
+    except Exception as e:   # icons are a nicety; fall back to theme icons
+        print(f"colony-monitor: no game icons ({e})", file=sys.stderr)
+    sys.exit(App().run([sys.argv[0]]))
