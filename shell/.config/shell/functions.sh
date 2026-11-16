@@ -71,3 +71,18 @@ wtreset() {
 
   git reset --hard "origin/$branch"
 }
+
+# Kill whatever process listens on a given TCP port.
+killport() {
+  if [ -z "$1" ]; then
+    echo "usage: killport <port>" >&2
+    return 1
+  fi
+  local pid
+  pid=$(lsof -ti "tcp:$1")
+  if [ -z "$pid" ]; then
+    echo "killport: nothing listening on port $1" >&2
+    return 1
+  fi
+  echo "$pid" | xargs kill -9
+}
