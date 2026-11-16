@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Apply the nwg-displays profile whose monitors exactly match the connected ones.
+# Hyprland runs this on login and on every monitor hotplug (hypr/monitor-profiles.lua).
+#   monitor-profile            apply the matching profile (no-op if none, or already applied)
+#   monitor-profile --dry-run  print the matching profile, change nothing
+# Profiles are the ones saved from nwg-displays' Profile menu, matched on monitor
+# description, not port. The laptop panel (eDP-*) is ignored on both sides: it is
+# always connected, and Omarchy's clamshell handling disables it while docked.
+# Uses hyprctl + jq + nwg-displays-apply.
+set -euo pipefail
+
+PROFILES="$HOME/.config/nwg-displays/profiles"
+RUNTIME="${XDG_RUNTIME_DIR:-/tmp}"
+LAST="$RUNTIME/monitor-profile.last"
+
+dry_run=0
+[[ ${1:-} == --dry-run ]] && dry_run=1
+
+# A dock connects its monitors as a burst of hotplug events. Serialize the runs and
+# let the burst settle, so the set is complete before matching.
+# ponytail: fixed 1s settle; add retries (like omarchy-hyprland-monitor-watch) if a slow dock misses it.
+exec 9>"$RUNTIME/monitor-profile.lock"
+flock 9
+(( dry_run )) || sleep 1
+
+# Sorted external monitor descriptions, one per line: the match key.
+externals='[.[] | select(.name | startswith("eDP") | not) | .description] | sort | join("\n")'
+connected=$(hyprctl monitors all -j | jq -r "$externals")
+
+# ponytail: first match wins (alphabetical); two profiles for the same monitors is user error.
+match=""
+for profile in "$PROFILES"/*.json; do
+  [[ -f $profile ]] || continue
+  if [[ $(jq -r ".displays | $externals" "$profile") == "$connected" ]]; then
+    match=$(basename "$profile" .json)
+    break
+  fi
+done
+
+if (( dry_run )); then
+  echo "${match:-no matching profile}"
+  exit 0
+fi
+
+[[ -n $match ]] || exit 0
+[[ -f $LAST && $(<"$LAST") == "$match" ]] && exit 0
+
+nwg-displays-apply -p "$match"
+echo "$match" >"$LAST"

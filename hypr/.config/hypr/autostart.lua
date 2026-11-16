@@ -29,3 +29,6 @@ o.window("^(claude-desktop)$", { workspace = "8 silent" })
 -- Power the Samsung TV off/on over the network when the other monitors blank and
 -- wake, so it never sees the signal drop (which makes it flap the HDMI link).
 o.launch_on_start(os.getenv("HOME") .. "/.local/scripts/tv-follow-dpms")
+
+-- Apply the matching nwg-displays monitor profile on login and hotplug.
+require("hypr.monitor-profiles")
