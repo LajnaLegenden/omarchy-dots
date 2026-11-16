@@ -33,7 +33,8 @@ dotfiles/
 │   ├── 40-nightlight.sh    #   enable the night light fade user timer
 │   ├── 40-game-mode.sh     #   enable the game-mode-ai user service
 │   ├── 70-clock-calendar.sh #  pacman: python-icalendar + python-recurring-ical-events (clock plugin)
-│   └── 50-idle-inhibit.sh  #   AUR audio idle-inhibitor, so video stops the lock
+│   ├── 50-idle-inhibit.sh  #   AUR audio idle-inhibitor, so video stops the lock
+│   └── 60-claude-voice.sh  #   run claude-voice/setup.sh (venv, models, ~/.claude-voice)
 ├── bash/
 │   └── .bashrc             # → ~/.bashrc — sources Omarchy defaults, then everything below
 ├── shell/
@@ -75,15 +76,20 @@ dotfiles/
 │       └── systemd/user/                      # the timer + oneshot service
 ├── game-mode/
 │   └── .config/systemd/user/game-mode-ai.service  # runs game-mode-ai for the session
-└── omarchy-plugins/
-    └── .config/omarchy/plugins/
-        └── lajna.clock/    # clone of omarchy.clock + ICS calendar events in the popup
+├── omarchy-plugins/
+│   └── .config/omarchy/plugins/
+│       └── lajna.clock/    # clone of omarchy.clock + ICS calendar events in the popup
+└── claude-voice/           # voice layer around Claude Code (not a Stow package, see below)
 ```
 
 Each top-level config dir is one Stow *package* whose inner tree mirrors `$HOME`,
 so `stow <pkg>` symlinks it into the right place. **Neovim is not a Stow
 package** — it's a standalone git repo, so `install.d/30-nvim.sh` clones it and
 symlinks `~/.config/nvim` at it (keeping its own history/upstream intact).
+**`claude-voice/` is not a Stow package either** — it's a small Python project;
+`install.d/60-claude-voice.sh` runs its `setup.sh`, which links `claude-voice`
+and its helpers into `~/.local/bin`. One manual step after the first run:
+`CLAUDE_CONFIG_DIR=~/.claude-voice claude`, then `/login`.
 
 ## Deploy on a fresh Omarchy machine
 
