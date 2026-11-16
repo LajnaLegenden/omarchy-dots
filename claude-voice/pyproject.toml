@@ -1,0 +1,24 @@
+[project]
+name = "claude-voice"
+version = "0.1.0"
+description = "Hands-free voice layer for Claude Code (local STT/TTS, hooks, tmux)"
+readme = "README.md"
+authors = [
+    { name = "Linus Jansson", email = "00jansson@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "kokoro-onnx>=0.6.1",
+    "numpy>=2.5.4",
+    "pysilero-vad>=3.4.0",
+]
+
+[project.scripts]
+claude-voice-daemon = "claude_voice.daemon:main"
+claude-voice-ctl = "claude_voice.ctl:main"
+claude-voice-hook = "claude_voice.hooks:main"
+
+[build-system]
+requires = ["uv_build>=0.13.4,<0.14.0"]
+build-backend = "uv_build"

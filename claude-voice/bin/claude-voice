@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Start a voice Claude session for a project:  claude-voice [project-dir]
+# Layout: Neovim (left, 55%) | Claude Code (right, 45%) in tmux, plus the shared voice daemon.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CTL="$ROOT/.venv/bin/claude-voice-ctl"
+CONFIG_DIR="${CLAUDE_VOICE_CONFIG_DIR:-$HOME/.claude-voice}"
+RUN="${XDG_RUNTIME_DIR:-/tmp}/claude-voice"
+DIR="$(readlink -f "${1:-$PWD}")"
+base="$(basename "$DIR")"
+NAME="voice-${base//[^A-Za-z0-9_-]/_}"
+NVIM_SOCK="$RUN/nvim-$NAME.sock"
+
+[ -d "$CONFIG_DIR" ] || { echo "No $CONFIG_DIR yet. Run $ROOT/setup.sh first." >&2; exit 1; }
+mkdir -p "$RUN"
+
+# 1. Voice daemon (one per machine; it owns the mic and speaker).
+if ! "$CTL" ping >/dev/null 2>&1; then
+  echo "Starting voice daemon (log: $RUN/daemon.log)…"
+  CLAUDE_CONFIG_DIR="$CONFIG_DIR" setsid "$ROOT/.venv/bin/claude-voice-daemon" \
+    >>"$RUN/daemon.log" 2>&1 </dev/null &
+  for _ in $(seq 120); do "$CTL" ping >/dev/null 2>&1 && break; sleep 0.5; done
+  "$CTL" ping >/dev/null 2>&1 || { echo "Daemon didn't start, see $RUN/daemon.log" >&2; exit 1; }
+fi
+
+# 2. Reuse an existing session for this project.
+if tmux has-session -t "=$NAME" 2>/dev/null; then
+  pane="$(tmux show-options -t "=$NAME:" -qv @claude_voice_pane)"
+  [ -n "$pane" ] && "$CTL" target "$pane" >/dev/null
+  if [ -n "${TMUX:-}" ]; then exec tmux switch-client -t "=$NAME"; else exec tmux attach -t "=$NAME"; fi
+fi
+
+# 3. New session: Neovim pane, then Claude pane to its right.
+rm -f "$NVIM_SOCK"
+if [ -n "${TMUX:-}" ]; then
+  tmux new-session -d -s "$NAME" -c "$DIR" -x "$(tmux display -p '#{window_width}')" \
+    -y "$(tmux display -p '#{window_height}')" nvim --listen "$NVIM_SOCK"
+else
+  tmux new-session -d -s "$NAME" -c "$DIR" -x "$(tput cols)" -y "$(tput lines)" nvim --listen "$NVIM_SOCK"
+fi
+nvim_pane="$(tmux display -p -t "=$NAME:" '#{pane_id}')"
+claude_pane="$(tmux split-window -h -l 45% -t "$nvim_pane" -c "$DIR" -P -F '#{pane_id}' \
+  -e "CLAUDE_CONFIG_DIR=$CONFIG_DIR" \
+  -e "CLAUDE_VOICE_NVIM_SOCK=$NVIM_SOCK" \
+  -e "CLAUDE_VOICE_DIR=$DIR" \
+  -e "PATH=$ROOT/bin:$PATH" \
+  "$ROOT/bin/claude-voice-pane")"
+tmux set-option -t "$nvim_pane" @claude_voice_pane "$claude_pane"
+tmux select-pane -t "$claude_pane"
+"$CTL" target "$claude_pane" >/dev/null
+
+if [ -n "${TMUX:-}" ]; then exec tmux switch-client -t "=$NAME"; else exec tmux attach -t "=$NAME"; fi

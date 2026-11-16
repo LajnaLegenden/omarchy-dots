@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Speak a short "come look" callout or walkthrough line in the voice session:  voice-say [--wait] <text…>
+# Returns immediately (speech is queued) unless --wait, which returns after it has been spoken.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CTL="$ROOT/.venv/bin/claude-voice-ctl"
+
+cmd=queue
+if [ "${1:-}" = "--wait" ]; then
+  cmd=say
+  shift
+fi
+[ $# -gt 0 ] || { echo "usage: voice-say [--wait] <text…>" >&2; exit 1; }
+
+if ! "$CTL" "$cmd" "$*" >/dev/null 2>&1; then
+  echo "voice-say: the voice daemon isn't running, nothing was spoken." >&2
+  exit 1
+fi

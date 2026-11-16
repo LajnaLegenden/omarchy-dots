@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Show a file in the voice session's Neovim pane:  voice-show <path> [start-line] [end-line]
+# Reopens the Neovim pane if it was closed.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+if [ $# -lt 1 ]; then
+  echo "usage: voice-show <path> [start-line] [end-line]" >&2
+  exit 1
+fi
+path="$(readlink -f -- "$1")"
+start="${2:-1}"
+end="${3:-$start}"
+[ -f "$path" ] || { echo "voice-show: no such file: $1" >&2; exit 1; }
+
+sock="${CLAUDE_VOICE_NVIM_SOCK:-}"
+if [ -z "$sock" ]; then
+  echo "voice-show: not in a claude-voice session. Tell the user the Neovim pane isn't available." >&2
+  exit 2
+fi
+
+alive() { [ -S "$sock" ] && nvim --server "$sock" --remote-expr "1" >/dev/null 2>&1; }
+
+if ! alive; then
+  if [ -n "${TMUX_PANE:-}" ]; then
+    rm -f "$sock"
+    tmux split-window -d -h -b -l 55% -t "$TMUX_PANE" -c "${CLAUDE_VOICE_DIR:-$PWD}" \
+      nvim --listen "$sock"
+    for _ in $(seq 50); do alive && break; sleep 0.1; done
+  fi
+  if ! alive; then
+    echo "voice-show: the Neovim pane is not running and could not be started. Tell the user to open it." >&2
+    exit 3
+  fi
+fi
+
+# Vimscript single-quoted string literal.
+q() { local s="${1//\'/\'\'}"; printf "'%s'" "$s"; }
+
+nvim --server "$sock" --remote-expr \
+  "luaeval('dofile(_A[1])(_A[2], _A[3], _A[4])', [$(q "$ROOT/nvim/show.lua"), $(q "$path"), $(q "$start"), $(q "$end")])"
+echo

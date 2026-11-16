@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Clear the context or close the voice session:  voice-session clear|close
+# Asks the user to confirm by voice. If they say yes, it runs once the current turn ends
+# and the reply has been spoken (Ctrl+U, /clear; or kill the voice tmux session).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CTL="$ROOT/.venv/bin/claude-voice-ctl"
+
+case "${1:-}" in
+  clear | close) ;;
+  *) echo "usage: voice-session clear|close" >&2; exit 1 ;;
+esac
+
+set +e
+"$CTL" session "$1" 2>/dev/null
+rc=$?
+set -e
+if [ "$rc" -eq 2 ]; then
+  echo "voice-session: the voice daemon isn't running, nothing was done." >&2
+fi
+exit "$rc"
