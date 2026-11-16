@@ -37,3 +37,10 @@ o.bind("SUPER + CTRL + UP", "Monitors brightness up",
   os.getenv("HOME") .. "/.local/scripts/monitors-brightness +10", { repeating = true })
 o.bind("SUPER + CTRL + DOWN", "Monitors brightness down",
   os.getenv("HOME") .. "/.local/scripts/monitors-brightness -10", { repeating = true })
+
+-- Dictation keys from before Alt + Space and Right Alt became the defaults.
+-- Remove these lines to give the keys back to applications.
+if o.dictation_installed and o.dictation_installed() then
+  o.bind("SUPER + CTRL + X", "Toggle dictation", "omarchy-dictation toggle")
+  o.bind_hold("F9", "Start dictation (push-to-talk)", "omarchy-dictation start", "Stop dictation (push-to-talk)", "omarchy-dictation stop")
+end
