@@ -59,6 +59,12 @@ dotfiles/
 ├── tmux-sessionizer/
 │   └── .config/tmux-sessionizer/
 │       └── config.json     # → ~/.config/tmux-sessionizer/config.json — go-folder-finder config
+├── herdr-app/
+│   └── .config/herdr-app/  # Herdr app: only my own files, the app owns the rest
+│       ├── layouts/workbench.json  # clone of Herdr's `main` + a Pull requests block in the sidebar
+│       └── mods/
+│           ├── sessionizer/ # alt-f popup: go-folder-finder projects, open/switch a space
+│           └── my-prs/      # my open PRs with changes requested / CI failing / CI running
 ├── hypr/
 │   └── .config/hypr/
 │       ├── bindings.lua    # → ~/.config/hypr/bindings.lua — my keybindings
@@ -100,7 +106,7 @@ cd ~/dotfiles
 # 1. symlink the config packages into $HOME
 mkdir -p ~/.config/systemd/user     # so stow links units into it, not over it
 mkdir -p ~/.config/omarchy/plugins  # so stow links each plugin, not the whole dir
-stow bash shell scripts hypr tmux tmux-sessionizer nightlight game-mode omarchy-plugins
+stow bash shell scripts hypr tmux tmux-sessionizer herdr-app nightlight game-mode omarchy-plugins
 stow --no-folding git    # keeps ~/.config/git a real dir; see Notes
 #   NB: `alacritty` is intentionally left out — the repo copy is behind the live
 #   file (missing its CSI-u Shift+Return bindings), so stowing it would regress.
@@ -188,7 +194,7 @@ git add btop && git commit -m "Add btop config"
 ```bash
 cd ~/dotfiles
 git pull
-stow -R bash shell scripts hypr tmux tmux-sessionizer omarchy-plugins   # -R = restow (picks up new/renamed files)
+stow -R bash shell scripts hypr tmux tmux-sessionizer herdr-app omarchy-plugins   # -R = restow (picks up new/renamed files)
 stow -R --no-folding git
 ./install.sh                                 # re-run hooks (idempotent) to pick up new tools
 ```
@@ -213,6 +219,18 @@ stow -D tmux        # -D = delete: removes the symlinks, leaves the repo untouch
   `local.conf` with a committed `local.conf.example` template. None needed yet.
 
 ## Notes / dependencies
+
+### Herdr app (`herdr-app/`)
+
+- `keys.json` is not stowed: Herdr may rewrite it and would replace the symlink.
+  Add the sessionizer key by hand to its `"global"` section:
+  `"alt-f": "mod.open:sessionizer"` (takes alt-f / forward-word from readline).
+- Switch to the layout once: `herdr-app do layout.switch --name workbench`
+  (or `ctrl-shift-l`).
+- `my-prs` needs `gh` logged in and `go-folder-finder` on PATH. It only shows PRs
+  for repos with a local clone under the go-folder-finder roots.
+- Herdr writes `jsconfig.json` and `gpui-kit.d.ts` into each mod folder on start;
+  `herdr-app/.gitignore` keeps them out of git.
 
 - **Clock calendar (`lajna.clock`).** A clone of Omarchy's `omarchy.clock`, so
   it no longer picks up upstream clock fixes. Calendars go on the clock's entry
