@@ -61,10 +61,11 @@ dotfiles/
 │       └── config.json     # → ~/.config/tmux-sessionizer/config.json — go-folder-finder config
 ├── herdr-app/
 │   └── .config/herdr-app/  # Herdr app: only my own files, the app owns the rest
-│       ├── layouts/workbench.json  # clone of Herdr's `main` + a Pull requests block in the sidebar
+│       ├── layouts/workbench.json  # clone of Herdr's `main` + PR sidebar block + agent board stack
 │       └── mods/
 │           ├── sessionizer/ # alt-f popup: go-folder-finder projects, open/switch a space
-│           └── my-prs/      # my open PRs with changes requested / CI failing / CI running
+│           ├── my-prs/      # my open PRs with changes requested / CI failing / CI running
+│           └── agent-board/ # alt-b: main area ⇄ kanban of agent states; also the status-bar toggle
 ├── hypr/
 │   └── .config/hypr/
 │       ├── bindings.lua    # → ~/.config/hypr/bindings.lua — my keybindings
@@ -224,7 +225,11 @@ stow -D tmux        # -D = delete: removes the symlinks, leaves the repo untouch
 
 - `keys.json` is not stowed: Herdr may rewrite it and would replace the symlink.
   Add the sessionizer key by hand to its `"global"` section:
-  `"alt-f": "mod.open:sessionizer"` (takes alt-f / forward-word from readline).
+  `"alt-f": "mod.open:sessionizer"` (takes alt-f / forward-word from readline) and
+  `"alt-b": "agent-board.toggle"` (takes alt-b / backward-word).
+- `alt-b` goes to the status-bar copy of `agent-board` (`props.role = "button"`):
+  Herdr only sends mod commands to on-screen copies, and the board itself is a
+  hidden stack child while the terminals show.
 - Switch to the layout once: `herdr-app do layout.switch --name workbench`
   (or `ctrl-shift-l`).
 - `my-prs` needs `gh` logged in and `go-folder-finder` on PATH. It only shows PRs
