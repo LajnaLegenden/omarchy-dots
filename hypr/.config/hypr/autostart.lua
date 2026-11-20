@@ -26,6 +26,11 @@ o.launch_on_start(os.getenv("HOME") .. "/.local/scripts/monitors-brightness rest
 o.window("^(slack)$", { workspace = "9 silent" })
 o.window("^(claude-desktop)$", { workspace = "8 silent" })
 
+-- Claude in Chrome makes Chromium request focus on every action, which steals
+-- focus and the cursor. Links from other apps still jump to Chromium, because
+-- omarchy-launch-browser focuses it with an explicit dispatch.
+o.window("^(chromium)$", { focus_on_activate = false })
+
 -- Power the Samsung TV off/on over the network when the other monitors blank and
 -- wake, so it never sees the signal drop (which makes it flap the HDMI link).
 o.launch_on_start(os.getenv("HOME") .. "/.local/scripts/tv-follow-dpms")
