@@ -5,6 +5,19 @@ import { exec, home, panes, spaces, run, theme, props, closeOverlay } from "herd
 const MAX_ROWS = 12
 const ROW_HEIGHT = 32
 const MOVES = { down: 1, up: -1, "ctrl-n": 1, "ctrl-p": -1 }
+const AGENT_WORKTREES = "/.claude/worktrees/"
+
+async function getWorktreePaths (path) {
+  const { code, stdout } = await exec("git", [ "-C", path, "worktree", "list", "--porcelain" ])
+    .catch(() => ({ code: 1, stdout: "" }))
+  if (code !== 0) return []
+  return stdout.split(/\n\n+/).flatMap((block) => {
+    const lines = block.split("\n")
+    const worktreePath = lines.find((line) => line.startsWith("worktree "))?.slice(9)
+    if (!worktreePath || worktreePath.includes(AGENT_WORKTREES)) return []
+    return lines.some((line) => line === "bare" || line.startsWith("prunable")) ? [] : [ worktreePath ]
+  })
+}
 
 function getProjectForCwd (cwd, projectPaths) {
   const owners = projectPaths.filter((path) => cwd === path || cwd.startsWith(`${path}/`))
@@ -52,7 +65,7 @@ export default class Sessionizer extends View {
       this.at = 0
       cx.notify()
     })
-    this.input.on("submit", () => this.pick(this.getRows()[this.at]))
+    this.input.on("submit", (_e, cx) => this.pick(this.getRows()[this.at], cx))
     this.input.focus()
     cx.timer.after(600, () => this.input.focus())
     cx.spawn(async (cx) => {
@@ -68,11 +81,20 @@ export default class Sessionizer extends View {
     closeOverlay(props().overlay)
   }
 
-  pick (row) {
+  pick (row, cx) {
     if (!row) return
-    this.close()
-    if (row.space) return run("space.select", { id: row.space.id })
-    run("space.new", { name: row.path.split("/").at(-1), folder: row.path })
+    cx.spawn(async () => {
+      const worktreePaths = await getWorktreePaths(row.path)
+      const familyPaths = worktreePaths.includes(row.path) ? worktreePaths : [ row.path ]
+      const spaceByPath = getSpaceByProject([ ...this.projects, ...familyPaths ])
+      this.close()
+      familyPaths
+        .filter((path) => path !== row.path && !spaceByPath.has(path))
+        .forEach((path) => run("space.new", { name: path.split("/").at(-1), folder: path }))
+      const space = spaceByPath.get(row.path)
+      if (space) return run("space.select", { id: space.id })
+      run("space.new", { name: row.path.split("/").at(-1), folder: row.path })
+    })
   }
 
   getRows () {
@@ -113,7 +135,7 @@ export default class Sessionizer extends View {
       .cursor_pointer()
       .when(this.top + index === this.at, (el) => el.bg(t.hover))
       .hover((s) => s.bg(t.hover))
-      .on_click(() => this.pick(r))
+      .on_click((_e, cx) => this.pick(r, cx))
       .child(div().w(12).flex_none().text_color(r.space ? t.accent : t.dim).child(r.space ? "●" : "·"))
       .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(r.label))
       .when(Boolean(r.space), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(r.space.name)))
