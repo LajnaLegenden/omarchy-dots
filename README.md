@@ -60,12 +60,18 @@ dotfiles/
 │   └── .config/tmux-sessionizer/
 │       └── config.json     # → ~/.config/tmux-sessionizer/config.json — go-folder-finder config
 ├── herdr-app/
-│   └── .config/herdr-app/  # Herdr app: only my own files, the app owns the rest
-│       ├── layouts/workbench.json  # clone of Herdr's `main` + PR sidebar block + agent board stack
-│       └── mods/
-│           ├── sessionizer/ # alt-f popup: go-folder-finder projects, open/switch a space
-│           ├── my-prs/      # my open PRs with changes requested / CI failing / CI running
-│           └── agent-board/ # alt-b: main area ⇄ kanban of agent states; also the status-bar toggle
+│   ├── .config/herdr-app/  # Herdr app: only my own files, the app owns the rest
+│   │   ├── layouts/workbench.json  # clone of Herdr's `main` + PR sidebar + agent board + my-agents/my-status,
+│   │   │                           # Omarchy theme + wallpaper, glass pane cards
+│   │   └── mods/
+│   │       ├── sessionizer/ # alt-f popup: go-folder-finder projects, open/switch a space + every git worktree of it
+│   │       ├── my-prs/      # my open PRs needing me, grouped by state, scoped to the focused space's repo
+│   │       ├── my-agents/   # clone of Herdr's `agents`: task title + live step/result (Claude's status.msg)
+│   │       ├── my-status/   # tmux-style powerline status bar: space, branch, agent counts, CPU, RAM, time, date
+│   │       └── agent-board/ # alt-b: main area ⇄ kanban of agent states; also the status-bar toggle
+│   ├── .config/omarchy/themed/herdr-app.json.tpl    # Omarchy renders Herdr's theme on every theme switch
+│   ├── .config/omarchy/hooks/{theme,font}-set.d/50-herdr-app  # → herdr-omarchy-sync
+│   └── .config/systemd/user/herdr-omarchy-sync.{path,service} # wallpaper changes → herdr-omarchy-sync
 ├── hypr/
 │   └── .config/hypr/
 │       ├── bindings.lua    # → ~/.config/hypr/bindings.lua — my keybindings
@@ -223,10 +229,26 @@ stow -D tmux        # -D = delete: removes the symlinks, leaves the repo untouch
 
 ### Herdr app (`herdr-app/`)
 
+- Look follows Omarchy: `herdr-omarchy-sync` (in `scripts/`) copies the rendered
+  `herdr-app.json` theme to `themes/omarchy.json`, sets `settings.json` `font` to
+  `omarchy-font-current`, and writes a 2560px `backgrounds/omarchy.jpg` from the
+  current wallpaper, blurred and tinted 30% toward the theme background for a
+  frosted look (Herdr can't blur behind panels; `chrome`/`canvas` get 70% alpha
+  in the template, terminals 70% opacity). Videos keep the last image. Runs from the theme-set and
+  font-set hooks and `herdr-omarchy-sync.path`, which watches
+  `~/.local/state/omarchy/current/` (a watch on the `background` symlink itself
+  follows it to the image and never fires). `install.d/45-herdr-omarchy.sh`
+  enables it; the theme only renders after one `omarchy theme set`.
 - `keys.json` is not stowed: Herdr may rewrite it and would replace the symlink.
   Add the sessionizer key by hand to its `"global"` section:
   `"alt-f": "mod.open:sessionizer"` (takes alt-f / forward-word from readline) and
   `"alt-b": "agent-board.toggle"` (takes alt-b / backward-word).
+- Tmux-style keys, also added by hand to `"global"` (same keys as `tmux/`):
+  `"alt-enter": "pane.split:down"`, `"alt-shift-enter": "pane.split:right"`,
+  `"alt-escape": "pane.close"`, `"alt-shift-h": "tab.prev"`, `"alt-shift-l": "tab.next"`.
+  That moves the default left/right pane swap to `"ctrl-alt-h": "pane.swap:left"` and
+  `"ctrl-alt-l": "pane.swap:right"`. Ctrl+H/J/K/L in nvim hands off to Herdr's
+  `pane.go` at the edge split (nvim config, `vim-tmux-navigator` spec).
 - `alt-b` goes to the status-bar copy of `agent-board` (`props.role = "button"`):
   Herdr only sends mod commands to on-screen copies, and the board itself is a
   hidden stack child while the terminals show.
