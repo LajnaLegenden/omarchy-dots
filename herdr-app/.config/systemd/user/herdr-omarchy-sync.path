@@ -1,0 +1,11 @@
+[Unit]
+Description=Herdr app: follow Omarchy wallpaper changes
+
+[Path]
+# Omarchy swaps the background symlink inside this folder; a watch on the
+# link itself would follow it to the image, which never changes.
+PathChanged=%h/.local/state/omarchy/current
+Unit=herdr-omarchy-sync.service
+
+[Install]
+WantedBy=default.target

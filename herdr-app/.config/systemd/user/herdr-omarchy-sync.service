@@ -1,0 +1,6 @@
+[Unit]
+Description=Herdr app: sync Omarchy theme, font and wallpaper
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/scripts/herdr-omarchy-sync

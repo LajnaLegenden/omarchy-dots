@@ -1,0 +1,3 @@
+#!/bin/bash
+# Herdr app follows Omarchy (see herdr-omarchy-sync).
+exec "$HOME/.local/scripts/herdr-omarchy-sync"

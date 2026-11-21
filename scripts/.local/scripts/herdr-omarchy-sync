@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Keep the Herdr app in step with Omarchy: theme colors, terminal font, wallpaper.
+# Run by the theme-set and font-set hooks and by herdr-omarchy-sync.path. Idempotent.
+set -euo pipefail
+
+herdr_home=${HERDR_APP_HOME:-$HOME/.config/herdr-app}
+state=$HOME/.local/state/omarchy/current
+mkdir -p "$herdr_home/themes" "$herdr_home/backgrounds"
+
+# Herdr reloads these files live, so each one is swapped in whole.
+replace_file () {
+  local temporary
+  temporary=$(mktemp "$1.XXXXXX")
+  cat >"$temporary"
+  chmod 644 "$temporary"
+  mv -f -- "$temporary" "$1"
+}
+
+# Omarchy renders ~/.config/omarchy/themed/herdr-app.json.tpl into the theme on every switch.
+theme_file=$state/theme/herdr-app.json
+if [[ -f $theme_file ]] && ! cmp -s "$theme_file" "$herdr_home/themes/omarchy.json"; then
+  replace_file "$herdr_home/themes/omarchy.json" <"$theme_file"
+fi
+
+settings=$herdr_home/settings.json
+font=$(omarchy-font-current 2>/dev/null || true)
+if [[ -n $font && -f $settings && $(jq -r '.font // ""' "$settings") != "$font" ]]; then
+  jq --arg font "$font" '.font = $font' "$settings" | replace_file "$settings"
+fi
+
+# Frosted glass: Herdr can't blur behind its panels, so the wallpaper copy is
+# blurred and tinted toward the theme background instead. Blurring at 640px and
+# scaling up looks the same as a radius-28 blur at 2560px and takes a fraction
+# of the time. A video background keeps the last image.
+background=$(readlink -f "$state/background" || true)
+tint=$(jq -r '.background // "#000000"' "$herdr_home/themes/omarchy.json" 2>/dev/null || echo "#000000")
+frost_recipe="$background $tint blur7@640 tint30"
+source_stamp=$herdr_home/backgrounds/.omarchy-source
+if [[ -f $background && $(file -b --mime-type "$background") == image/* && $(cat "$source_stamp" 2>/dev/null) != "$frost_recipe" ]]; then
+  magick "$background[0]" -resize '640x640>' -blur 0x7 -fill "$tint" -colorize 30% -resize 2560x2560 -quality 90 jpg:- \
+    | replace_file "$herdr_home/backgrounds/omarchy.jpg"
+  echo "$frost_recipe" >"$source_stamp"
+fi
