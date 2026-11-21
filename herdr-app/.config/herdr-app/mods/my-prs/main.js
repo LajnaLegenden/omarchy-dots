@@ -1,11 +1,16 @@
 import { View, div, svg } from "gpui-kit"
 import { v_flex, h_flex } from "gpui-base"
-import { exec, panes, spaces, run, theme, notify, nextCommand, layout } from "herdr"
+import { exec, panes, spaces, focused, run, theme, notify, nextCommand, layout } from "herdr"
 
 const FAST_POLL_MS = 30_000
 const SLOW_POLL_MS = 120_000
 const RUNNING = [ "PENDING", "EXPECTED" ]
 const FAILING = [ "FAILURE", "ERROR" ]
+const GROUPS = [
+  { urgency: 3, label: "Changes requested", color: "ansi3" },
+  { urgency: 2, label: "CI failing", color: "ansi1" },
+  { urgency: 1, label: "CI running", color: "working" },
+]
 const PR_QUERY = `query {
   search(query: "is:pr is:open author:@me archived:false", type: ISSUE, first: 100) {
     nodes { ... on PullRequest {
@@ -54,6 +59,17 @@ function openProject (path, projectPaths) {
   if (match) return run("space.select", { id: spaceByTab.get(match.tab).id })
   run("space.new", { name: path.split("/").at(-1), folder: path })
 }
+
+function getFocusedRepo (checkouts) {
+  const space = spaces().find(({ id }) => id === focused()?.space)
+  if (!space?.folder || space.machine !== null) return null
+  const owner = getProjectForCwd(space.folder, checkouts.map(({ path }) => path))
+  return checkouts.find(({ path }) => path === owner)?.repo ?? null
+}
+
+const toShortTitle = (title) => title
+  .replace(/^[\w-]+(\([^)]*\))?!?:\s*/, "")
+  .replace(/^[\w.-]+\/(?=\S)/, "")
 
 async function getCheckouts () {
   const projects = (await getStdout("go-folder-finder", [ "list" ])).split("\n").filter(Boolean)
@@ -156,7 +172,7 @@ export default class MyPrs extends View {
     this.projectPaths = [ ...new Set([ ...projects, ...checkouts.map(({ path }) => path) ]) ]
     this.error = null
     this.prs = scopedPrs.filter((pr) => pr.hasChanges || pr.isFailing || pr.isRunning).sort((a, b) =>
-      a.isDraft - b.isDraft || getUrgency(b) - getUrgency(a) || b.updatedAt.localeCompare(a.updatedAt))
+      getUrgency(b) - getUrgency(a) || a.isDraft - b.isDraft || b.updatedAt.localeCompare(a.updatedAt))
   }
 
   glyph (t, pr) {
@@ -168,7 +184,8 @@ export default class MyPrs extends View {
   render () {
     const t = theme()
     const isCollapsed = isNarrow()
-    const prs = this.prs ?? []
+    const focusedRepo = getFocusedRepo(this.checkouts)
+    const prs = (this.prs ?? []).filter((pr) => !focusedRepo || pr.repo === focusedRepo)
     const openPr = (pr) => exec("xdg-open", [ pr.url ])
 
     const compactRow = (pr) => h_flex()
@@ -183,32 +200,36 @@ export default class MyPrs extends View {
       .on_click(() => openPr(pr))
       .child(this.glyph(t, pr))
 
+    const groupHeader = ({ label, color }, count) => h_flex()
+      .id(`pr-group-${label}`)
+      .px(8)
+      .pt(8)
+      .h(30)
+      .flex_none()
+      .gap(6)
+      .items_center()
+      .text_size(11)
+      .font_medium()
+      .child(div().text_color(t[color]).child(label))
+      .child(div().text_color(t.dim).child(String(count)))
+
     const row = (pr) => {
       const checkout = this.checkouts.find(({ repo, branch }) => repo === pr.repo && branch === pr.branch)
-      const words = [
-        pr.hasChanges && { text: "changes requested", color: t.ansi3 },
-        pr.isFailing && { text: "CI failing", color: t.ansi1 },
-        pr.isRunning && { text: "CI running", color: t.working },
-        pr.isDraft && { text: "draft", color: t.dim },
-      ].filter(Boolean)
       return h_flex()
         .id(`pr-${pr.id}`)
         .px(8)
-        .h(42)
+        .h(28)
         .flex_none()
         .rounded(8)
-        .gap(9)
+        .gap(6)
         .items_center()
         .cursor_pointer()
         .hover((s) => s.bg(t.hover))
-        .tooltip(pr.title)
+        .tooltip(`${pr.repoName}#${pr.number} ${pr.title}`)
         .on_click(() => openPr(pr))
-        .child(h_flex().w(14).flex_none().justify_center().child(this.glyph(t, pr)))
-        .child(v_flex().flex_1().min_w(0).gap(1)
-          .child(div().truncate().text_color(pr.isDraft ? t.muted : t.foreground).child(pr.title))
-          .child(h_flex().min_w(0).gap(5).text_size(11)
-            .child(div().flex_none().text_color(t.dim).child(`${pr.repoName}#${pr.number}`))
-            .children(words.map(({ text, color }) => div().flex_none().truncate().text_color(pr.isDraft ? t.dim : color).child(`· ${text}`)))))
+        .child(div().flex_none().text_color(t.dim).child(focusedRepo ? `#${pr.number}` : `${pr.repoName}#${pr.number}`))
+        .child(div().flex_1().min_w(0).truncate().text_color(pr.isDraft ? t.muted : t.foreground).child(toShortTitle(pr.title)))
+        .when(pr.isDraft, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("draft")))
         .when(Boolean(checkout), (el) => el.child(div()
           .id(`pr-space-${pr.id}`)
           .flex_none()
@@ -253,7 +274,8 @@ export default class MyPrs extends View {
         .flex_none()
         .gap(6)
         .items_center()
-        .child(div().text_size(11.5).font_medium().text_color(t.dim).child("Pull requests"))
+        .child(div().text_size(11.5).font_medium().text_color(t.dim)
+          .child(focusedRepo ? `Pull requests · ${focusedRepo.split("/")[1]}` : "Pull requests"))
         .when(prs.length > 0, (el) => el.child(div().text_size(11).text_color(t.dim).child(String(prs.length))))
         .child(div().flex_1())
         .child(refreshButton)))
@@ -264,7 +286,10 @@ export default class MyPrs extends View {
         .min_h(0)
         .px(isCollapsed ? 0 : 8)
         .overflow_y_scrollbar()
-        .children(prs.map(isCollapsed ? compactRow : row)))
+        .children(isCollapsed ? prs.map(compactRow) : GROUPS.flatMap((group) => {
+          const members = prs.filter((pr) => getUrgency(pr) === group.urgency)
+          return members.length ? [ groupHeader(group, members.length), ...members.map(row) ] : []
+        })))
       .when(Boolean(this.error) && !isCollapsed, (el) => el.child(div()
         .id("pr-error")
         .px(16)
