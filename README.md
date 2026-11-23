@@ -118,13 +118,21 @@ stow --no-folding git    # keeps ~/.config/git a real dir; see Notes
 #   NB: `alacritty` is intentionally left out — the repo copy is behind the live
 #   file (missing its CSI-u Shift+Return bindings), so stowing it would regress.
 
-# 2. run the install hooks (TPM + sessionizer binary + nvim clone)
+# 2. run the install hooks (TPM + sessionizer binary + nvim clone + CLI tools,
+#    gh and herdr-app included). Stow first: 45-herdr-omarchy.sh needs the stowed unit.
 ./install.sh                                  # needs git, go, and SSH access to GitHub
 
 # 3. reload
 exec bash          # pick up the new ~/.bashrc
 tmux               # prefix is C-k; prefix+f opens the sessionizer; prefix+I (re)installs plugins
 nvim               # first launch: lazy.nvim bootstraps the plugins
+
+# 4. Herdr app first run, in this order
+gh auth login                                     # my-prs reads PRs through gh
+herdr-app                                         # start once so it writes settings.json, then quit
+omarchy theme set "$(omarchy-theme-current)"      # renders herdr-app.json.tpl; the hook syncs theme, font, wallpaper
+herdr-app do layout.switch --name workbench       # with herdr-app running again
+# then add the keys.json bindings by hand (see Notes → Herdr app)
 ```
 
 Prereqs the hooks expect: `sudo pacman -S go fzf` if missing, and a working
