@@ -66,6 +66,7 @@ dotfiles/
 │   │   └── mods/
 │   │       ├── sessionizer/ # alt-f popup: go-folder-finder projects, open/switch a space + every git worktree of it
 │   │       ├── my-prs/      # my open PRs as state-colored cards, newest first; repo space: all, Root: needing me
+│   │       ├── space-emoji/ # 0 px watcher: prefixes repo spaces with the repo's emoji (emoji.json, auto-picks new repos)
 │   │       ├── my-agents/   # clone of Herdr's `agents`: task title + live step/result (Claude's status.msg)
 │   │       ├── my-status/   # tmux-style powerline status bar: space, branch, agent counts, CPU, RAM, time, date
 │   │       └── agent-board/ # alt-b: main area ⇄ kanban of agent states; also the status-bar toggle
