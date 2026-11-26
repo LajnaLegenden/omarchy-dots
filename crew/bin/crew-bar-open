@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Opens the crew bar over the Herdr window, from anywhere: bind it to a global Hyprland key.
+# mod.open toggles, so the same key closes an open bar.
+set -euo pipefail
+
+herdr_class=$(hyprctl clients -j | jq -r 'first(.[] | select(.class | test("^herdr-app$"; "i")) | .class) // empty')
+if [ -n "$herdr_class" ]; then
+  hyprctl dispatch focuswindow "class:^${herdr_class}\$" >/dev/null
+fi
+exec herdr-app do mod.open --name crew-bar
