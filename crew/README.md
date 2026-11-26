@@ -27,7 +27,7 @@ Requirements: Python 3.12+, `hc` and `herdr-app` on PATH, `claude` for the bar.
 
 | Key | Opens |
 |---|---|
-| `alt-shift-b` | Broadcast dialog: compose, presets, pick agents by space/status, collect replies live; click a reply to jump to that agent |
+| `alt-shift-b` | Broadcast dialog: compose, presets, agents grouped by repo (all worktree spaces of a repo, across machines) with a tick-all checkbox per repo and foldable groups; quick picks All / This repo / This space / Working / Idle + done; collect replies live; click a reply to jump to that agent |
 | `ctrl-shift-space` | Crew bar: type a request, Haiku acts; destructive actions and every message to agents ask first (Enter = yes, Esc = no) |
 
 The office view opens by itself as a tab in the office's space.

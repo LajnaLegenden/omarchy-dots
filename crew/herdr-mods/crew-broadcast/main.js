@@ -2,9 +2,13 @@ import { View, div } from "gpui-kit"
 import { v_flex, h_flex, TextareaState, Textarea } from "gpui-base"
 import { agents, spaces, focused, exec, home, readTextFile, watchFolder, run, theme, props, closeOverlay } from "herdr"
 
+const OTHER_GROUP = "Other"
+const LEADING_EMOJI = /^(\p{Extended_Pictographic}\uFE0F?)\s*/u
+
 const QUICK_PICKS = [
   [ "All", () => true ],
-  [ "This space", (row, spaceId) => row.spaceId === spaceId ],
+  [ "This repo", (row, focus) => focus.repo !== null && row.repo === focus.repo ],
+  [ "This space", (row, focus) => row.spaceId === focus.spaceId ],
   [ "Working", (row) => row.status === "working" ],
   [ "Idle + done", (row) => row.status === "idle" || row.status === "done" ],
   [ "None", () => false ],
@@ -47,6 +51,35 @@ async function getAllRepliesByAddress (id) {
   return new Map(records.map((record) => [ record.from, record ]))
 }
 
+// Worktrees share their origin (or main checkout) name, so every mediatool worktree space lands in one group,
+// on this machine and on connected ones.
+async function getRepoName ({ folder, machine }) {
+  if (!folder) return null
+  const git = (args) => exec("git", args, { cwd: folder, on: machine ?? null })
+    .then(({ code, stdout }) => code === 0 ? stdout.trim() : "")
+    .catch(() => "")
+  const [ origin, commonDir ] = await Promise.all([
+    git([ "remote", "get-url", "origin" ]),
+    git([ "rev-parse", "--path-format=absolute", "--git-common-dir" ]),
+  ])
+  const originName = origin.split(/[/:]/).pop()?.replace(/\.git$/, "")
+  const parts = commonDir.split("/")
+  const mainName = parts.at(-1) === ".git" ? parts.at(-2) : parts.at(-1)?.replace(/\.git$/, "")
+  return (originName || mainName || "").toLowerCase() || null
+}
+
+function getRepoGroups (rows, isRepoKnown) {
+  const groups = new Map()
+  for (const row of rows) {
+    const key = row.repo ?? (isRepoKnown ? OTHER_GROUP : row.spaceName)
+    const group = groups.get(key) ?? { key, emoji: null, rows: [] }
+    group.emoji ??= row.spaceName.match(LEADING_EMOJI)?.[1] ?? null
+    group.rows.push(row)
+    groups.set(key, group)
+  }
+  return [ ...groups.values() ].sort((a, b) => (a.key === OTHER_GROUP) - (b.key === OTHER_GROUP))
+}
+
 function getPickerRows (crewAgents) {
   const liveByAddress = new Map(agents().map((agent) => [ agent.address, agent ]))
   const spaceIndexById = new Map(spaces().map((space) => [ space.id, space.index ]))
@@ -68,6 +101,12 @@ function getPickerRows (crewAgents) {
 }
 
 const toTabLabel = (name) => /^\d+$/.test(name) ? `tab ${name}` : name
+const toMachine = (address) => address.split("/")[0]
+const toShortAddress = (address) => address.split("/").pop()
+const toRowLabel = ({ spaceName, tabName }) => {
+  const space = spaceName.replace(LEADING_EMOJI, "")
+  return tabName && tabName !== "1" ? `${space} / ${toTabLabel(tabName)}` : space
+}
 
 export default class CrewBroadcast extends View {
   init (_props, cx) {
@@ -80,6 +119,8 @@ export default class CrewBroadcast extends View {
     this.error = null
     this.result = null
     this.repliesByAddress = new Map()
+    this.repoBySpaceId = null
+    this.foldedRepos = new Set(JSON.parse(localStorage.getItem("foldedRepos") ?? "[]"))
     this.handle = cx.focus_handle()
     this.textarea = TextareaState.new({ placeholder: "Message for the picked agents…", rows: 5 })
     this.textarea.on("change", (_e, cx) => {
@@ -105,6 +146,17 @@ export default class CrewBroadcast extends View {
       this.presets = presets.presets
       cx.notify()
     })
+    cx.spawn(async (cx) => {
+      const entries = await Promise.all(spaces().map(async (space) => [ space.id, await getRepoName(space) ]))
+      this.repoBySpaceId = new Map(entries)
+      cx.notify()
+    })
+  }
+
+  toggleFold (key) {
+    if (this.foldedRepos.has(key)) this.foldedRepos.delete(key)
+    else this.foldedRepos.add(key)
+    localStorage.setItem("foldedRepos", JSON.stringify([ ...this.foldedRepos ]))
   }
 
   close () {
@@ -161,8 +213,10 @@ export default class CrewBroadcast extends View {
   }
 
   renderCompose (t) {
-    const rows = getPickerRows(this.crewAgents ?? [])
+    const repoBySpaceId = this.repoBySpaceId
+    const rows = getPickerRows(this.crewAgents ?? []).map((row) => ({ ...row, repo: repoBySpaceId?.get(row.spaceId) ?? null }))
     const spaceId = focused()?.space
+    const focus = { spaceId, repo: repoBySpaceId?.get(spaceId) ?? null }
     const pickedCount = rows.filter(({ address }) => this.pickedAddresses.has(address)).length
     const canSend = this.phase === "compose" && this.hasText && pickedCount > 0
 
@@ -195,7 +249,7 @@ export default class CrewBroadcast extends View {
       .justify_center()
       .text_size(10)
       .text_color(t.foreground)
-      .child(isTicked ? "✓" : "")
+      .child(isTicked === "partial" ? "–" : isTicked ? "✓" : "")
 
     const presetChip = (preset) => chip(`cb-preset-${preset.name}`, preset.name, (_e, cx) => {
       this.textarea.set_value(preset.text)
@@ -205,11 +259,73 @@ export default class CrewBroadcast extends View {
     }).tooltip(preset.text)
 
     const quickChip = ([ label, isPicked ]) => chip(`cb-pick-${label}`, label, (_e, cx) => {
-      this.pickedAddresses = new Set(rows.filter((row) => isPicked(row, spaceId)).map(({ address }) => address))
+      this.pickedAddresses = new Set(rows.filter((row) => isPicked(row, focus)).map(({ address }) => address))
       cx.notify()
     })
 
-    const spaceHeader = (name) => div().px(8).pt(8).pb(2).text_size(11).font_semibold().text_color(t.dim).child(name)
+    const machineBadge = (machine) => div()
+      .flex_none()
+      .px(6)
+      .rounded(5)
+      .bg(t.raised)
+      .text_size(10.5)
+      .text_color(t.muted)
+      .child(machine)
+
+    const groupHeader = (group) => {
+      const pickedInGroup = group.rows.filter(({ address }) => this.pickedAddresses.has(address)).length
+      const tickState = pickedInGroup === 0 ? false : pickedInGroup === group.rows.length ? true : "partial"
+      const workingCount = group.rows.filter(({ status }) => status === "working").length
+      const isFolded = this.foldedRepos.has(group.key)
+      const summary = [
+        `${group.rows.length} agent${group.rows.length === 1 ? "" : "s"}`,
+        workingCount > 0 && `${workingCount} working`,
+        isFolded && pickedInGroup > 0 && `${pickedInGroup} picked`,
+      ].filter(Boolean).join(" · ")
+      return h_flex()
+        .h(30)
+        .mt(4)
+        .gap(6)
+        .flex_none()
+        .items_center()
+        .child(div()
+          .id(`cb-fold-${group.key}`)
+          .w(18)
+          .flex_none()
+          .text_center()
+          .text_size(11)
+          .text_color(t.dim)
+          .cursor_pointer()
+          .hover((s) => s.text_color(t.foreground))
+          .on_click((_e, cx) => {
+            this.toggleFold(group.key)
+            cx.notify()
+          })
+          .child(isFolded ? "▸" : "▾"))
+        .child(h_flex()
+          .id(`cb-group-${group.key}`)
+          .flex_1()
+          .min_w(0)
+          .h(28)
+          .px(6)
+          .gap(8)
+          .items_center()
+          .rounded(7)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => {
+            const addresses = group.rows.map(({ address }) => address)
+            for (const address of addresses) {
+              if (tickState === true) this.pickedAddresses.delete(address)
+              else this.pickedAddresses.add(address)
+            }
+            cx.notify()
+          })
+          .child(checkbox(tickState))
+          .when(Boolean(group.emoji), (el) => el.child(div().flex_none().child(group.emoji)))
+          .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(group.key))
+          .child(div().flex_none().text_size(11.5).text_color(t.dim).child(summary)))
+    }
 
     const row = (r) => h_flex()
       .id(`cb-row-${r.address}`)
@@ -226,16 +342,18 @@ export default class CrewBroadcast extends View {
         else this.pickedAddresses.add(r.address)
         cx.notify()
       })
+      .ml(24)
       .child(checkbox(this.pickedAddresses.has(r.address)))
       .child(div().size(7).flex_none().rounded(4).bg(t[r.status] ?? t.unknown))
-      .child(div().w(36).flex_none().text_size(12).text_color(t.dim).child(r.address))
-      .child(div().flex_none().max_w(160).truncate().text_color(t.foreground).child(toTabLabel(r.tabName)))
-      .child(div().flex_none().text_size(11.5).text_color(t.dim).child(r.agent ?? ""))
+      .child(div().w(150).flex_none().truncate().text_color(t.foreground).child(toRowLabel(r)))
+      .child(div().w(34).flex_none().text_size(12).text_color(t.dim).child(toShortAddress(r.address)))
+      .child(div().w(76).flex_none().truncate().text_size(11.5).text_color(t.dim).child(r.agent ?? ""))
       .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(r.task ?? ""))
+      .when(r.address.includes("/"), (el) => el.child(machineBadge(toMachine(r.address))))
 
-    const list = rows.flatMap((r, index) => [
-      ...(index === 0 || rows[index - 1].spaceName !== r.spaceName ? [ spaceHeader(r.spaceName) ] : []),
-      row(r),
+    const list = getRepoGroups(rows, repoBySpaceId !== null).flatMap((group) => [
+      groupHeader(group),
+      ...(this.foldedRepos.has(group.key) ? [] : group.rows.map(row)),
     ])
     const emptyText = this.crewAgents === null ? "Loading agents…" : "No agents running."
     const sendLabel = this.phase === "sending" ? "Sending…" : `Send to ${pickedCount} · Ctrl+Enter`
@@ -323,11 +441,13 @@ export default class CrewBroadcast extends View {
           .on_click(() => this.focusAgent(target.address)))
         .child(h_flex().gap(9).items_center()
           .child(div().size(7).flex_none().rounded(4).bg(t[status] ?? t.unknown))
-          .child(div().w(36).flex_none().text_size(12).text_color(t.dim).child(target.address))
+          .child(div().w(34).flex_none().text_size(12).text_color(t.dim).child(toShortAddress(target.address)))
           .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(target.where ?? "not running"))
+          .when(target.address.includes("/"), (el) => el.child(div().flex_none().px(6).rounded(5).bg(t.raised)
+            .text_size(10.5).text_color(t.muted).child(toMachine(target.address))))
           .child(div().flex_none().text_size(11.5).text_color(t.dim).child(target.agent ?? ""))
           .child(div().flex_none().text_size(11.5).text_color(labelColor).child(label)))
-        .when(Boolean(replyRecord), (el) => el.child(div().pl(52).text_size(12.5).text_color(t.foreground).child(replyRecord.text)))
+        .when(Boolean(replyRecord), (el) => el.child(div().pl(50).text_size(12.5).text_color(t.foreground).child(replyRecord.text)))
     }
 
     const hint = reply ? `Click an agent to go to it · later: crew replies ${id}` : "Click an agent to go to it"
