@@ -1,0 +1,15 @@
+{
+  "name": "crew-local",
+  "description": "Local marketplace for crew, the agent message bus for Herdr",
+  "owner": { "name": "lajna" },
+  "plugins": [
+    {
+      "name": "crew",
+      "description": "Teach Claude Code agents in Herdr to answer crew messages, coordinate through channels, and take resource slots before heavy builds",
+      "source": "./crew",
+      "version": "0.1.0",
+      "category": "productivity",
+      "tags": ["herdr", "agents", "coordination"]
+    }
+  ]
+}

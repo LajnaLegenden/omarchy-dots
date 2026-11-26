@@ -1,0 +1,17 @@
+{
+  "description": "Tell agents running inside herdr-core terminals that crew exists",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$HC_TERMINAL_ID\" ] && command -v crew >/dev/null 2>&1 && crew guide --session; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

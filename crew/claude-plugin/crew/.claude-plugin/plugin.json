@@ -1,0 +1,5 @@
+{
+  "name": "crew",
+  "version": "0.1.0",
+  "description": "Agent message bus for Herdr: replies to <crew> messages, channels, resource slots"
+}
