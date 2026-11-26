@@ -25,6 +25,13 @@ elif command == "run":
     n = int(counter.read_text()) + 1 if counter.exists() else 1
     counter.write_text(str(n))
     print(json.dumps({"address": f"t9{n}", "name": name, "state": "live"}))
+elif command == "file" and args[1] == "read":
+    machine = args[args.index("--on") + 1] if "--on" in args else "local"
+    path = state / "remote" / machine / args[-1].lstrip("/")
+    if not path.exists():
+        print("not found", file=sys.stderr)
+        sys.exit(3)
+    print(path.read_text(), end="")
 elif command in ("kill", "rm"):
     print(json.dumps({"ok": True}))
 else:

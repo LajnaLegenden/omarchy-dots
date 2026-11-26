@@ -12,8 +12,11 @@ def is_agent(terminal):
         terminal.get("state") == "live"
         and terminal.get("status") is not None
         and terminal.get("agent") not in SHELLS
-        and "/" not in terminal["address"]
     )
+
+
+def get_machine(address):
+    return address.split("/", 1)[0] if "/" in address else None
 
 
 def get_sender(terminals=None):
@@ -40,6 +43,7 @@ def get_agents(terminals=None):
     return [
         {
             "address": t["address"],
+            "machine": get_machine(t["address"]),
             "name": t.get("name"),
             "agent": t.get("agent"),
             "status": t.get("status"),

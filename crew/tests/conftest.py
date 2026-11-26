@@ -24,6 +24,11 @@ class Crew:
     def fail_send(self, address, message="hc: refused"):
         (self.hc_dir / "fail.json").write_text(json.dumps({address: message}))
 
+    def put_remote_file(self, machine, path, text):
+        target = self.hc_dir / "remote" / machine / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
     def be(self, address):
         if address is None:
             self.monkeypatch.delenv("HC_TERMINAL_ID", raising=False)

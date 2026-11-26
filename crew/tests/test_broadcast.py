@@ -120,3 +120,9 @@ def test_collect_timeout_reports_missing(crew):
 def test_presets_lists_three(crew):
     _, out, _ = crew.run_json("broadcast", "--presets")
     assert [p["name"] for p in out["presets"]] == ["shutdown", "status", "pause"]
+
+
+def test_all_includes_agents_on_connected_machines(crew):
+    crew.set_terminals([agent("t1"), agent("laptop/t4")])
+    _, out, _ = crew.run_json("broadcast", "--all", "--dry-run", "x")
+    assert [t["address"] for t in out["targets"]] == ["t1", "laptop/t4"]

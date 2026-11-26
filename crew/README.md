@@ -60,6 +60,12 @@ crew office ls
 
 Broadcast selectors combine with AND across flags and OR within a repeated flag: `--all`, `--space`, `--repo` (origin name or main checkout folder, so Herdr worktrees match), `--cwd`, `--to`, `--status`, `--exclude`. One of them is required. You are never a target of your own broadcast.
 
+## Other machines
+
+Agents on machines connected to herdr-core (`hc machine ls`, e.g. Herdr over SSH) show up as `machine/t7` in `crew who` and are normal targets: `--all` includes them, `--to laptop/t7` picks one, `--repo` runs git on that machine. Delivery is `hc send machine/t7`.
+
+A remote agent's `crew reply` lands in that machine's `~/.local/state/crew/replies/`. The sending side pulls those with `hc file read --on <machine>` when it collects (`crew replies`, `broadcast --collect`, the dialog), polling every 2–3 s. So crew must be installed on every machine whose agents should reply. Reply push-back to an agent sender, `crew status` tasks and offices stay per machine.
+
 ## How messages look to an agent
 
 ```

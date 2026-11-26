@@ -70,11 +70,12 @@ def run_who(args):
     if args.json:
         print(json.dumps({"agents": all_agents}, ensure_ascii=False))
         return 0
+    width = max([5, *(len(a["address"]) for a in all_agents)])
     for agent in all_agents:
         marker = "*" if agent["self"] else " "
         role = f" [{agent['office']}/{agent['role']}]" if agent["office"] else ""
         task = f"  — {agent['task']}" if agent["task"] else ""
-        print(f"{marker}{agent['address']:<5} {agent['status']:<8} {agent['agent']:<12} {agent['where']}{role}{task}")
+        print(f"{marker}{agent['address']:<{width}} {agent['status']:<8} {agent['agent']:<12} {agent['where']}{role}{task}")
     return 0
 
 

@@ -34,6 +34,19 @@ async function getRepliesByAddress (path) {
   return new Map(records.map((record) => [ record.from, record ]))
 }
 
+// Agents on other machines reply into that machine's crew state; crew replies pulls those over hc.
+async function getAllRepliesByAddress (id) {
+  const { stdout } = await execCrew([ "replies", id, "--json" ])
+  const records = stdout.split("\n").flatMap((line) => {
+    try {
+      return line ? [ JSON.parse(line) ] : []
+    } catch {
+      return []
+    }
+  })
+  return new Map(records.map((record) => [ record.from, record ]))
+}
+
 function getPickerRows (crewAgents) {
   const liveByAddress = new Map(agents().map((agent) => [ agent.address, agent ]))
   const spaceIndexById = new Map(spaces().map((space) => [ space.id, space.index ]))
@@ -126,12 +139,17 @@ export default class CrewBroadcast extends View {
 
   async watchReplies (path, cx) {
     const folder = path.slice(0, path.lastIndexOf("/"))
+    const { id, targets } = this.result
+    const hasRemote = targets.some(({ address, delivery }) => delivery === "sent" && address.includes("/"))
     const refresh = async (cx) => {
-      this.repliesByAddress = await getRepliesByAddress(path)
+      this.repliesByAddress = hasRemote
+        ? await getAllRepliesByAddress(id).catch(() => this.repliesByAddress)
+        : await getRepliesByAddress(path)
       cx.notify()
     }
     await exec("mkdir", [ "-p", folder ]).catch(() => null)
     await refresh(cx)
+    if (hasRemote) cx.timer.every(3000, (cx) => refresh(cx))
     try {
       for (;;) {
         await watchFolder(folder)

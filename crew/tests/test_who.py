@@ -51,3 +51,9 @@ def test_shell_child_of_agent_speaks_as_the_agent(crew):
     crew.be("t20")
     crew.run("status", "building")
     assert (crew.state_dir / "agents" / "t7.json").exists()
+
+
+def test_lists_agents_on_connected_machines(crew):
+    crew.set_terminals([agent("t1"), agent("laptop/t4"), shell("laptop/t5")])
+    _, out, _ = crew.run_json("who")
+    assert [(a["address"], a["machine"]) for a in out["agents"]] == [("t1", None), ("laptop/t4", "laptop")]

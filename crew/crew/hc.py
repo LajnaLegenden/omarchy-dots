@@ -36,6 +36,17 @@ def start_terminal(argv, *, name, cwd, labels):
     return json.loads(result.stdout)
 
 
+def read_file_on(machine, path):
+    result = run_hc(["file", "read", "--on", machine, path], timeout=20)
+    return result.stdout if result.returncode == 0 else None
+
+
+def exec_on(machine, argv, cwd=None):
+    cwd_args = ["--cwd", cwd] if cwd else []
+    result = run_hc(["exec", "--on", machine, *cwd_args, "--timeout", "10", "--", *argv], timeout=20)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def kill_terminal(address):
     result = run_hc(["kill", address])
     return result.returncode == 0

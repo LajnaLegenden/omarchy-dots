@@ -7,7 +7,7 @@ import sys
 from collections import Counter
 from pathlib import PurePosixPath
 
-from crew import agents, delivery, messages, replies
+from crew import agents, delivery, hc, messages, replies
 from crew.errors import NotFoundError, UsageError
 
 PRESETS = {
@@ -28,7 +28,7 @@ LEADING_SYMBOLS = re.compile(r"^\W+")
 MATCHERS = {
     "to": lambda agent, refs: any(agents.is_ref_match(agent, ref) for ref in refs),
     "space": lambda agent, names: bool(get_space_keys(agent["where"]) & set(names)),
-    "repo": lambda agent, names: bool(get_repo_names(agent["cwd"]) & set(names)),
+    "repo": lambda agent, names: bool(get_repo_names(agent.get("machine"), agent["cwd"]) & set(names)),
     "cwd": lambda agent, prefixes: any(is_under(agent["cwd"], prefix) for prefix in prefixes),
     "status": lambda agent, statuses: agent["status"] in statuses,
 }
@@ -178,18 +178,20 @@ def is_under(cwd, prefix):
 
 
 @functools.cache
-def get_repo_names(cwd):
+def get_repo_names(machine, cwd):
     if not cwd:
         return frozenset()
-    origin = get_git_output(cwd, "remote", "get-url", "origin")
-    common_dir = get_git_output(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    origin = get_git_output(machine, cwd, "remote", "get-url", "origin")
+    common_dir = get_git_output(machine, cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
     origin_name = origin and re.split(r"[/:]", origin.rstrip("/"))[-1]
     common_path = common_dir and PurePosixPath(common_dir)
     main_name = common_path and (common_path.parent.name if common_path.name == ".git" else common_path.name)
     return frozenset(name.removesuffix(".git").lower() for name in (origin_name, main_name) if name)
 
 
-def get_git_output(cwd, *args):
+def get_git_output(machine, cwd, *args):
+    if machine:
+        return hc.exec_on(machine, ["git", *args], cwd=cwd)
     try:
         result = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):

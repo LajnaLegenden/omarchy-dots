@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 
@@ -20,9 +21,26 @@ def test_reply_is_recorded_with_sender_identity(crew):
     assert (record["from"], record["where"], record["text"]) == ("t7", "🎬 mediatool / 1", "on it")
 
 
-def test_unknown_message_exits_3(crew):
-    code, _, _ = crew.run("reply", "m-nope", "x")
-    assert code == 3
+def test_reply_to_a_message_from_another_machine_is_kept_here(crew):
+    crew.set_terminals([agent("t7")])
+    crew.be("t7")
+    code, _, err = crew.run("reply", "m-remote1", "done")
+    [record] = store.get_records(crew.state_dir / "replies" / "m-remote1.jsonl")
+    assert (code, record["from"]) == (0, "t7") and "another machine" in err
+
+
+def test_bad_message_id_is_refused(crew):
+    code, _, _ = crew.run("reply", "../../x", "done")
+    assert code == 2
+
+
+def test_replies_from_a_remote_agent_are_pulled_over_hc(crew):
+    crew.set_terminals([agent("laptop/t7")])
+    message_id = send(crew, "laptop/t7")
+    reply = '{"id": "r-1", "msg": "%s", "from": "t7", "text": "saved"}\n' % message_id
+    crew.put_remote_file("laptop", f".local/state/crew/replies/{message_id}.jsonl", reply)
+    code, out, _ = crew.run("replies", message_id, "--follow", "--timeout", "5", "--json")
+    assert code == 0 and json.loads(out)["from"] == "laptop/t7"
 
 
 def test_reply_to_agent_sender_is_pushed_back(crew):
