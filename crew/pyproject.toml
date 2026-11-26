@@ -1,0 +1,9 @@
+[project]
+name = "crew"
+version = "0.1.0"
+description = "Message bus for agents running in herdr-core"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

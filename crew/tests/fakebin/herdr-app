@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+state = Path(os.environ["FAKE_HC_DIR"])
+args = sys.argv[1:]
+with open(state / "herdr_calls.jsonl", "a") as log:
+    log.write(json.dumps(args) + "\n")
+ls_path = state / "herdr-ls.json"
+outputs = {
+    "ls": ls_path.read_text() if ls_path.exists() else json.dumps({"spaces": []}),
+    "commands": "[]",
+    "status": "{}",
+    "do": json.dumps({"ok": True}),
+}
+command = args[0] if args else ""
+if command not in outputs:
+    print(f"fake herdr-app: unknown command {command}", file=sys.stderr)
+    sys.exit(2)
+print(outputs[command])

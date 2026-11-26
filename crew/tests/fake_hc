@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+state = Path(os.environ["FAKE_HC_DIR"])
+args = sys.argv[1:]
+with open(state / "calls.jsonl", "a") as log:
+    log.write(json.dumps(args) + "\n")
+terminals = json.loads((state / "terminals.json").read_text()) if (state / "terminals.json").exists() else []
+failures = json.loads((state / "fail.json").read_text()) if (state / "fail.json").exists() else {}
+command = args[0]
+if command == "ls":
+    print(json.dumps({"terminals": terminals}))
+elif command == "send":
+    address = args[1]
+    if address in failures:
+        print(failures[address], file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({"sent": True}))
+elif command == "run":
+    name = args[args.index("--name") + 1] if "--name" in args else "x"
+    counter = state / "run_counter"
+    n = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(n))
+    print(json.dumps({"address": f"t9{n}", "name": name, "state": "live"}))
+elif command in ("kill", "rm"):
+    print(json.dumps({"ok": True}))
+else:
+    print(f"fake hc: unknown command {command}", file=sys.stderr)
+    sys.exit(2)

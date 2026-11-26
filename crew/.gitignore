@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+.e2e/
+*.pyc
+herdr-mods/*/gpui-kit.d.ts
+herdr-mods/*/herdr.d.ts
+herdr-mods/*/jsconfig.json
+uv.lock

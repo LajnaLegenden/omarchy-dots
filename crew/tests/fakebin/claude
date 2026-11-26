@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+state = Path(os.environ["FAKE_HC_DIR"])
+call = {"argv": sys.argv[1:], "pid": os.getpid(), "cwd": os.getcwd(), "run": os.environ.get("CREW_BAR_RUN")}
+with open(state / "claude-calls.jsonl", "a") as log:
+    log.write(json.dumps(call) + "\n")
+script_path = state / "claude.json"
+script = json.loads(script_path.read_text()) if script_path.exists() else {}
+time.sleep(script.get("sleep", 0))
+for line in script.get("lines", []):
+    print(json.dumps(line), flush=True)
+if script.get("stderr"):
+    print(script["stderr"], file=sys.stderr)
+sys.exit(script.get("exit", 0))
